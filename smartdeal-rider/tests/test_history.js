@@ -1,0 +1,10 @@
+async function test() {
+  try {
+    const res = await fetch('http://localhost:5000/api/rider/5/history');
+    const data = await res.json();
+    console.log(JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.log(e.message);
+  }
+}
+test();

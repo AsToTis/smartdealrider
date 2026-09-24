@@ -1,0 +1,2286 @@
+app.put('/api/riders/:id/location', async (req, res) => {
+  const riderId = req.params.id;
+  const { lat, lng } = req.body;
+  try {
+    await db.execute('UPDATE riders SET current_lat = ?, current_lng = ?, updated_at = NOW() WHERE rider_id = ?', [lat, lng, riderId]);
+    res.json({ success: true, message: 'Rider location updated' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// 5. ORDERS APIs
+// ==========================================
+
+app.get('/api/orders/user/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  if (!userId || userId === 'undefined' || userId === 'null') {
+    return res.status(400).json({ success: false, message: 'ไม่พบรหัสผู้ใช้งาน' });
+  }
+
+  try {
+    const sql = `
+      SELECT 
+        orders.*, 
+        shops.name AS shop_name,
+        shops.image_url AS shop_image,
+        del.delivery_status,
+        u_rider.full_name AS rider_name,
+        u_rider.phone AS rider_phone
+      FROM orders
+      LEFT JOIN shops ON orders.shop_id = shops.shop_id
+      LEFT JOIN deliveries del ON orders.order_id = del.order_id
+      LEFT JOIN riders r ON del.rider_id = r.rider_id
+      LEFT JOIN users u_rider ON r.user_id = u_rider.user_id
+      WHERE orders.user_id = ?
+      ORDER BY orders.created_at DESC
+    `;
+
+    const [orders] = await db.execute(sql, [userId]);
+
+    if (orders.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const statusThai = {
+      pending: 'กำลังดำเนินการ',
+      paid: 'สำเร็จ',
+      preparing: 'กำลังเตรียมอาหาร',
+      ready: 'พร้อมส่ง',
+      delivering: 'กำลังจัดส่ง',
+      completed: 'สำเร็จ',
+      cancelled: 'ยกเลิก'
+    };
+
+    const deliveryTypeThai = {
+      delivery: 'จัดส่งถึงบ้าน',
+      pickup: 'รับที่ร้าน'
+    };
+
+    const formattedOrders = await Promise.all(orders.map(async (order) => {
+      const [items] = await db.execute(
+        `SELECT oi.*, p.name AS db_product_name, p.image_url AS product_image
+         FROM order_items oi
+         LEFT JOIN products p ON oi.product_id = p.product_id
+         WHERE oi.order_id = ?`,
+        [order.order_id]
+      );
+
+      const primaryItem = items && items.length > 0 ? items[0] : null;
+      const displayTitle = primaryItem ? (primaryItem.product_name || primaryItem.db_product_name || order.shop_name) : (order.shop_name || 'ร้านค้า');
+      const displayImage = (primaryItem && primaryItem.product_image) || order.shop_image || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500';
+
+      return {
+        ...order,
+        items: items.map(item => ({
+          ...item,
+          product_name: item.product_name || item.db_product_name || 'สินค้า'
+        })),
+        item_count: items.reduce((acc, i) => acc + (i.quantity || 1), 0),
+        display_title: displayTitle,
+        display_image: displayImage,
+        shop_name: order.shop_name || 'ร้านค้าทั่วไป',
+        status_text: statusThai[order.order_status] || order.order_status,
+        delivery_type_text: deliveryTypeThai[order.delivery_type] || order.delivery_type
+      };
+    }));
+
+    res.json({ success: true, data: formattedOrders });
+
+  } catch (error) {
+    console.error(`❌ SQL Error (/api/orders/user/${userId}):`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ดึงรายละเอียดออเดอร์เดี่ยว
+app.get('/api/orders/:orderId', async (req, res) => {
+  const { orderId } = req.params;
+  try {
+    const [orders] = await db.execute(`
+      SELECT 
+        orders.*, 
+        shops.name AS shop_name,
+        shops.image_url AS shop_image,
+        del.delivery_status,
+        u_rider.full_name AS rider_name,
+        u_rider.phone AS rider_phone
+      FROM orders
+      LEFT JOIN shops ON orders.shop_id = shops.shop_id
+      LEFT JOIN deliveries del ON orders.order_id = del.order_id
+      LEFT JOIN riders r ON del.rider_id = r.rider_id
+      LEFT JOIN users u_rider ON r.user_id = u_rider.user_id
+      WHERE orders.order_id = ?
+    `, [orderId]);
+
+    if (orders.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบคำสั่งซื้อ' });
+    }
+
+    const order = orders[0];
+    const [items] = await db.execute(
+      `SELECT oi.*, p.name AS db_product_name, p.image_url AS product_image
+       FROM order_items oi
+       LEFT JOIN products p ON oi.product_id = p.product_id
+       WHERE oi.order_id = ?`,
+      [orderId]
+    );
+
+    res.json({
+      success: true,
+      order: {
+        ...order,
+        items: items.map(item => ({
+          ...item,
+          product_name: item.product_name || item.db_product_name || 'สินค้า'
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('❌ GET /api/orders/:orderId error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API สำหรับแจ้งปัญหาคำสั่งซื้อ
+app.post('/api/orders/:orderId/issues', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { user_id, issue_topic, issue_detail } = req.body;
+
+    if (!user_id || !issue_topic) {
+      return res.status(400).json({ success: false, message: 'กรุณาระบุ user_id และ issue_topic' });
+    }
+
+    const [orderCheck] = await db.query('SELECT order_id FROM orders WHERE order_id = ?', [orderId]);
+    if (orderCheck.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบคำสั่งซื้อ' });
+    }
+
+    await db.query(
+      'INSERT INTO order_issues (order_id, user_id, issue_topic, issue_detail, status) VALUES (?, ?, ?, ?, ?)',
+      [orderId, user_id, issue_topic, issue_detail || '', 'pending']
+    );
+
+    res.json({ success: true, message: 'ส่งเรื่องร้องเรียนสำเร็จ แอดมินจะติดต่อกลับโดยเร็วที่สุด' });
+  } catch (error) {
+    console.error('❌ POST /api/orders/:orderId/issues error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/orders', async (req, res) => {
+  const { 
+    user_id, 
+    shop_id, 
+    subtotal, 
+    delivery_fee, 
+    discount, 
+    total_amount, 
+    delivery_type, 
+    payment_method, 
+    receiver_name, 
+    receiver_phone, 
+    shipping_address, 
+    latitude, 
+    longitude, 
+    note_for_rider, 
+    items 
+  } = req.body;
+  
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    // 1. ตรวจสอบสต็อกสินค้าก่อนทุกรายการ (Stock Availability Check)
+    if (items && items.length > 0) {
+      for (const item of items) {
+        const pId = item.product_id || item.id;
+        const reqQty = parseInt(item.quantity || 1, 10);
+        if (pId) {
+          const [pRows] = await connection.query(
+            'SELECT product_id, name, stock_quantity FROM products WHERE product_id = ? FOR UPDATE',
+            [pId]
+          );
+
+          if (pRows.length > 0) {
+            const product = pRows[0];
+            const currentStock = parseInt(product.stock_quantity !== undefined && product.stock_quantity !== null ? product.stock_quantity : 0, 10);
+            
+            if (currentStock <= 0) {
+              await connection.rollback();
+              return res.status(400).json({ 
+                success: false, 
+                message: `สินค้า "${product.name}" หมดแล้ว (Out of Stock)` 
+              });
+            }
+
+            if (currentStock < reqQty) {
+              await connection.rollback();
+              return res.status(400).json({ 
+                success: false, 
+                message: `สินค้า "${product.name}" คงเหลือไม่เพียงพอ (เหลือเพียง ${currentStock} ชิ้น)` 
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // 2. บันทึกข้อมูลคำสั่งซื้อลงตาราง orders
+    const [orderResult] = await connection.query(
+      `INSERT INTO orders (
+        user_id, shop_id, subtotal, delivery_fee, discount, total_amount, 
+        order_status, delivery_type, payment_method, receiver_name, 
+        receiver_phone, shipping_address, latitude, longitude, note_for_rider
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        user_id || 2,
+        shop_id,
+        subtotal || 0,
+        delivery_fee || 0,
+        discount || 0,
+        total_amount,
+        delivery_type || 'delivery',
+        payment_method || 'promptpay',
+        receiver_name || '',
+        receiver_phone || '',
+        shipping_address || '',
+        latitude || 0,
+        longitude || 0,
+        note_for_rider || ''
+      ]
+    );
+
+    const orderId = orderResult.insertId;
+
+    // 3. บันทึก order_items และตัดสต็อกสินค้าใน MySQL ทันที
+    if (items && items.length > 0) {
+      for (const item of items) {
+        const pId = item.product_id || item.id;
+        const reqQty = parseInt(item.quantity || 1, 10);
+        const itemPrice = parseFloat(item.price ?? item.discount_price ?? 0);
+
+        await connection.query(
+          `INSERT INTO order_items (order_id, product_id, product_name, quantity, price, shop_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [orderId, pId || null, item.product_name || item.name || '', reqQty, itemPrice, item.shop_id || shop_id || 1]
+        );
+
+        // ตัดสต็อกสินค้าในตาราง products
+        if (pId) {
+          const [deductResult] = await connection.query(
+            'UPDATE products SET stock_quantity = GREATEST(0, stock_quantity - ?) WHERE product_id = ? AND stock_quantity >= ?',
+            [reqQty, pId, reqQty]
+          );
+          console.log(`📦 ตัดสต็อกสินค้า ID: ${pId} จำนวน: ${reqQty} ชิ้น (Affected: ${deductResult.affectedRows})`);
+        }
+      }
+    }
+
+    await connection.commit();
+    console.log(`✅ สั่งซื้อและตัดสต็อกสินค้าสำเร็จสำหรับ Order ID: ${orderId}`);
+
+    res.json({ 
+      success: true, 
+      message: 'สั่งซื้อและตัดสต็อกสินค้าเรียบร้อยแล้ว', 
+      order_id: orderId 
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('❌ SQL Error (POST /api/orders):', error.message);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการสร้างคำสั่งซื้อ', error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// ==========================================
+// 6. PAYMENT APIs
+// ==========================================
+
+// 1. API Gen PromptPay QR Code จริงจาก เบอร์โทร/เลขผู้เสียภาษี และ ยอดเงิน
+app.get('/api/payments/generate-qr', async (req, res) => {
+  try {
+    const { amount } = req.query;
+    const targetPromptPay = "0812345678"; // ใส่เบอร์ PromptPay หรือ เลขนิติบุคคลบัญชีรับเงินของระบบคุณ
+    
+    // สร้าง Payload ตามมาตรฐาน EMVCo PromptPay
+    const payload = generatePayload(targetPromptPay, { amount: parseFloat(amount) });
+    const qrDataUrl = await QRCode.toDataURL(payload);
+
+    res.json({ success: true, qr_image: qrDataUrl, payload });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// 2. API ยืนยันการชำระเงินจริง + กระจายเงินเข้า Wallet ร้านค้าและไรเดอร์
+app.post(['/api/payments', '/api/payments/confirm'], async (req, res) => {
+  const { order_id, shop_id, rider_id, total_amount, amount, delivery_fee, payment_method } = req.body;
+
+  const effectiveOrderId = order_id;
+  const effectiveAmount = parseFloat(total_amount || amount) || 0;
+
+  // ใช้ Connection จาก Pool เพื่อทำ Transaction
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [orderRows] = await connection.query('SELECT * FROM orders WHERE order_id = ?', [effectiveOrderId]);
+    const orderData = orderRows.length > 0 ? orderRows[0] : {};
+    const targetShopId = shop_id || orderData.shop_id || 1;
+    const fee = parseFloat(delivery_fee || orderData.delivery_fee) || 0;
+    const shopAmount = effectiveAmount > 0 ? effectiveAmount - fee : (parseFloat(orderData.total_amount) || 0) - fee;
+    const riderAmount = fee;
+
+    // 1. บันทึกลงตาราง payments (ประวัติการชำระเงิน)
+    await connection.query(`
+      INSERT INTO payments (order_id, payment_method, payment_status, amount, paid_at)
+      VALUES (?, ?, 'success', ?, NOW())
+    `, [effectiveOrderId, payment_method || 'promptpay', effectiveAmount]);
+
+    // 2. อัปเดตสถานะออเดอร์เป็น 'pending' (รอร้านค้ายืนยัน)
+    await connection.query(`
+      UPDATE orders 
+      SET order_status = 'pending'
+      WHERE order_id = ?
+    `, [effectiveOrderId]);
+
+        // 3. (ถูกระงับด้วยระบบ Escrow) ไม่เติมเงินเข้า Wallet ร้านค้าทันที
+    // เงินจะเข้ากระเป๋าร้านค้าเมื่อลูกค้ายืนยันการรับสินค้าผ่าน /api/orders/:orderId/complete
+    /*
+    if (targetShopId) {
+      await connection.query(`
+        INSERT INTO shop_wallets (shop_id, balance) VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance)
+      `, [targetShopId, shopAmount]);
+
+      await connection.query(`
+        INSERT INTO wallet_transactions (user_type, target_id, order_id, amount, type, description)
+        VALUES ('shop', ?, ?, ?, 'credit', ?)
+      `, [targetShopId, effectiveOrderId, shopAmount, \`รายรับจากออเดอร์ #${effectiveOrderId}\`]);
+    }
+    */
+
+    // 4. เติมเงินเข้า Wallet ไรเดอร์ (ถ้ามี) + บันทึก Log
+    if (rider_id) {
+      await connection.query(`
+        INSERT INTO rider_wallets (rider_id, balance) VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance)
+      `, [rider_id, riderAmount]);
+
+      await connection.query(`
+        INSERT INTO wallet_transactions (user_type, target_id, order_id, amount, type, description)
+        VALUES ('rider', ?, ?, ?, 'credit', ?)
+      `, [rider_id, effectiveOrderId, riderAmount, `ค่าจัดส่งออเดอร์ #${effectiveOrderId}`]);
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: "บันทึกการชำระเงินและกระจายยอดเข้า Wallet เรียบร้อย" });
+
+// ==========================================
+// API ยืนยันรับสินค้า (Escrow System)
+// ==========================================
+app.put('/api/orders/:orderId/complete', async (req, res) => {
+  const orderId = req.params.orderId;
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [orderRows] = await connection.query('SELECT * FROM orders WHERE order_id = ? FOR UPDATE', [orderId]);
+    if (orderRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'ไม่พบคำสั่งซื้อ' });
+    }
+
+    const order = orderRows[0];
+    if (order.order_status === 'completed') {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'คำสั่งซื้อนี้เสร็จสมบูรณ์ไปแล้ว' });
+    }
+
+    // 1. อัปเดตสถานะเป็น completed
+    await connection.query('UPDATE orders SET order_status = "completed" WHERE order_id = ?', [orderId]);
+
+    // 2. คำนวณยอดเงินร้านค้าและโอนเข้า Wallet
+    const shopId = order.shop_id;
+    const totalAmount = parseFloat(order.total_amount) || 0;
+    const deliveryFee = parseFloat(order.delivery_fee) || 0;
+    const shopAmount = totalAmount - deliveryFee;
+
+    if (shopId && shopAmount > 0) {
+      await connection.query(`
+        INSERT INTO shop_wallets (shop_id, balance) VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance)
+      `, [shopId, shopAmount]);
+
+      await connection.query(`
+        INSERT INTO wallet_transactions (user_type, target_id, order_id, amount, type, description)
+        VALUES ('shop', ?, ?, ?, 'credit', ?)
+      `, [shopId, orderId, shopAmount, `รายรับจากออเดอร์ #${orderId}`]);
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: 'ยืนยันรับสินค้าและโอนเงินให้ร้านค้าสำเร็จ' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Order Complete Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการยืนยันรับสินค้า' });
+  } finally {
+    connection.release();
+  }
+});
+
+
+  } catch (error) {
+    await connection.rollback();
+    console.error('Payment Confirmation Error:', error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล", error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// ==========================================
+// 6.3 AUCTION APIs (ระบบประมูลสินค้าหายาก Flash Auction)
+// ==========================================
+
+// 1. ดึงห้องประมูลที่กำลังเปิดอยู่ (สำหรับหน้าแรกและห้องประมูล)
+app.get(['/api/auctions', '/api/auctions/active'], async (req, res) => {
+  try {
+    const [auctions] = await db.execute(`
+      SELECT a.*,
+        (SELECT COUNT(*) FROM auction_bids WHERE auction_id = a.auction_id) AS total_bids
+      FROM auctions a
+      WHERE a.auction_status = 'active'
+      ORDER BY a.end_time ASC
+    `);
+
+    const now = new Date();
+    const result = auctions.map(a => {
+      const endTime = new Date(a.end_time);
+      const diff = endTime - now;
+      const hours = Math.floor(diff / (1000 * 60 * 60));
+      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+      const startPrice = parseFloat(a.start_price || 89);
+      let originalPrice = parseFloat(a.original_price);
+      let discountPercent = parseInt(a.discount_percent, 10);
+
+      if (!originalPrice || isNaN(originalPrice) || originalPrice <= startPrice) {
+        discountPercent = discountPercent || 80;
+        originalPrice = Math.round(startPrice / (1 - discountPercent / 100));
+      } else if (!discountPercent || isNaN(discountPercent)) {
+        discountPercent = Math.round(((originalPrice - startPrice) / originalPrice) * 100);
+      }
+
+      return {
+        ...a,
+        start_price: startPrice,
+        current_bid: parseFloat(a.current_bid || startPrice),
+        original_price: originalPrice,
+        discount_percent: discountPercent,
+        time_remaining_text: diff > 0 ? `${hours} ชม. ${minutes} นาที` : 'หมดเวลา',
+        time_remaining_ms: Math.max(0, diff),
+        hours: Math.max(0, hours),
+        minutes: Math.max(0, minutes),
+        seconds: Math.max(0, seconds)
+      };
+    });
+
+    res.json({ success: true, auctions: result, active_auction: result[0] || null });
+  } catch (error) {
+    console.error('❌ GET /api/auctions error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 2. ดึงรายละเอียดห้องประมูลเดี่ยว + ประวัติการเสนอราคา (Leaderboard)
+app.get('/api/auctions/:auctionId', async (req, res) => {
+  let { auctionId } = req.params;
+  let targetId = parseInt(auctionId, 10);
+  if (isNaN(targetId) || targetId <= 0) {
+    targetId = 1;
+  }
+
+  try {
+    let [rows] = await db.execute(`
+      SELECT a.*,
+        (SELECT COUNT(*) FROM auction_bids WHERE auction_id = a.auction_id) AS total_bids
+      FROM auctions a
+      WHERE a.auction_id = ?
+    `, [targetId]);
+
+    // หากไม่พบ ID ที่ระบุ ให้ fallback ไปยังห้องประมูลที่เปิดอยู่ หรือห้องแรกสุด
+    if (rows.length === 0) {
+      const [fallback] = await db.execute(`
+        SELECT a.*,
+          (SELECT COUNT(*) FROM auction_bids WHERE auction_id = a.auction_id) AS total_bids
+        FROM auctions a
+        WHERE a.auction_status = 'active'
+        ORDER BY a.auction_id ASC
+        LIMIT 1
+      `);
+      if (fallback.length > 0) {
+        rows = fallback;
+        targetId = fallback[0].auction_id;
+      } else {
+        const [anyRows] = await db.execute(`
+          SELECT a.*,
+            (SELECT COUNT(*) FROM auction_bids WHERE auction_id = a.auction_id) AS total_bids
+          FROM auctions a
+          ORDER BY a.auction_id ASC
+          LIMIT 1
+        `);
+        rows = anyRows;
+        if (anyRows.length > 0) targetId = anyRows[0].auction_id;
+      }
+    }
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบรายการประมูล' });
+    }
+
+    const auction = rows[0];
+
+    // ประวัติการเสนอราคาเรียงจากสูงสุดไปต่ำสุด
+    const [bids] = await db.execute(`
+      SELECT ab.*, u.full_name, u.phone
+      FROM auction_bids ab
+      LEFT JOIN users u ON ab.user_id = u.user_id
+      WHERE ab.auction_id = ?
+      ORDER BY ab.bid_amount DESC, ab.created_at DESC
+      LIMIT 15
+    `, [targetId]);
+
+    const now = new Date();
+    const endTime = new Date(auction.end_time);
+    const diff = endTime - now;
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+    const defaultNames = ['อรวรรณ รักษ์เจริญ', 'พิเชษฐ์ เลิศสุข', 'ธนกฤต สุขสวัสดิ์', 'นงลักษณ์ ใจงาม'];
+
+    const formattedBids = bids.map((b, idx) => {
+      let displayName = b.full_name;
+      if (!displayName || displayName === 'lil' || displayName === 'oooo') {
+        displayName = b.user_id === 1 ? 'อรวรรณ รักษ์เจริญ' : b.user_id === 2 ? 'สมชาย ใจดี' : defaultNames[idx % defaultNames.length];
+      }
+
+      const d = new Date(b.created_at);
+      const hh = d.getHours().toString().padStart(2, '0');
+      const mm = d.getMinutes().toString().padStart(2, '0');
+
+      return {
+        bid_id: b.bid_id,
+        user_id: b.user_id,
+        bid_amount: parseFloat(b.bid_amount),
+        bidder_name: displayName,
+        formatted_time: `${hh}:${mm}`,
+        created_at: b.created_at,
+        bid_status: b.bid_status
+      };
+    });
+
+    const startPrice = parseFloat(auction.start_price || 89);
+    let originalPrice = parseFloat(auction.original_price);
+    let discountPercent = parseInt(auction.discount_percent, 10);
+
+    if (!originalPrice || isNaN(originalPrice) || originalPrice <= startPrice) {
+      discountPercent = discountPercent || 80;
+      originalPrice = Math.round(startPrice / (1 - discountPercent / 100));
+    } else if (!discountPercent || isNaN(discountPercent)) {
+      discountPercent = Math.round(((originalPrice - startPrice) / originalPrice) * 100);
+    }
+
+    res.json({
+      success: true,
+      auction: {
+        ...auction,
+        start_price: startPrice,
+        original_price: originalPrice,
+        discount_percent: discountPercent,
+        current_bid: parseFloat(auction.current_bid || startPrice),
+        min_increment: parseFloat(auction.min_increment || 10),
+        time_remaining_text: diff > 0 ? `${hours} ชม. ${minutes} นาที` : 'หมดเวลา',
+        time_remaining_ms: Math.max(0, diff),
+        hours: Math.max(0, hours),
+        minutes: Math.max(0, minutes),
+        seconds: Math.max(0, seconds),
+        is_ended: auction.auction_status === 'ended' || diff <= 0
+      },
+      bids: formattedBids
+    });
+  } catch (error) {
+    console.error('❌ GET /api/auctions/:id error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 3. เสนอราคาประมูล (Real-time Bidding)
+app.post('/api/auctions/:auctionId/bid', async (req, res) => {
+  const { auctionId } = req.params;
+  const { user_id, bid_amount } = req.body;
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [rows] = await connection.query(
+      'SELECT * FROM auctions WHERE auction_id = ? FOR UPDATE',
+      [auctionId]
+    );
+
+    if (rows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'ไม่พบรายการประมูล' });
+    }
+
+    const auction = rows[0];
+    if (auction.auction_status === 'ended') {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'การประมูลสิ้นสุดแล้ว' });
+    }
+
+    const currentBid = parseFloat(auction.current_bid || auction.start_price);
+    const minIncrement = parseFloat(auction.min_increment || 100);
+    const bidAmt = parseFloat(bid_amount);
+
+    if (isNaN(bidAmt) || bidAmt <= currentBid) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `ต้องเสนอราคามากกว่าราคาปัจจุบัน ฿${currentBid.toLocaleString()}`
+      });
+    }
+
+    // ตรวจสอบหาผู้เสนอราคาสูงสุดคนก่อนหน้า ก่อนที่จะถูกแซงราคา
+    const [previousActiveBids] = await connection.query(
+      'SELECT user_id, bid_amount FROM auction_bids WHERE auction_id = ? AND bid_status = "active" ORDER BY bid_amount DESC LIMIT 1',
+      [auctionId]
+    );
+    const previousBidder = previousActiveBids.length > 0 ? previousActiveBids[0] : null;
+
+    // อัปเดตสถานะ bid เก่าเป็น outbid
+    await connection.query(
+      'UPDATE auction_bids SET bid_status = "outbid" WHERE auction_id = ? AND bid_status = "active"',
+      [auctionId]
+    );
+
+    // บันทึก bid ใหม่
+    const effectiveUserId = user_id || 2;
+    await connection.query(
+      'INSERT INTO auction_bids (auction_id, user_id, bid_amount, bid_status, created_at) VALUES (?, ?, ?, "active", NOW())',
+      [auctionId, effectiveUserId, bidAmt]
+    );
+
+    // อัปเดต current_bid และ highest_bidder_id ใน auctions
+    await connection.query(
+      'UPDATE auctions SET current_bid = ?, winner_user_id = ? WHERE auction_id = ?',
+      [bidAmt, effectiveUserId, auctionId]
+    );
+
+    // หากมีผู้เสนอราคาก่อนหน้าที่ไม่ใช่คนเดียวกัน ให้ส่งการแจ้งเตือนถูกแซงราคา (auction_outbid)
+    if (previousBidder && Number(previousBidder.user_id) !== Number(effectiveUserId)) {
+      await connection.query(
+        `INSERT INTO notifications (user_id, title, message, type, reference_id, is_read, created_at)
+         VALUES (?, ?, ?, 'auction_outbid', ?, 0, NOW())`,
+        [
+          previousBidder.user_id,
+          'คุณถูกแซงราคาประมูล!',
+          `มีผู้เสนอราคาสูงกว่าคุณในสินค้า "${auction.title}" ที่ราคา ฿${bidAmt.toLocaleString()}`,
+          auctionId
+        ]
+      );
+      console.log(`🔔 แจ้งเตือนผู้ใช้ ${previousBidder.user_id} ว่าถูกแซงราคาในห้อง #${auctionId}`);
+    }
+
+    await connection.commit();
+
+    // ดึงประวัติ bids ล่าสุดกลับไปให้ Frontend ทันที
+    const [latestBids] = await db.execute(`
+      SELECT ab.*, u.full_name
+      FROM auction_bids ab
+      LEFT JOIN users u ON ab.user_id = u.user_id
+      WHERE ab.auction_id = ?
+      ORDER BY ab.bid_amount DESC, ab.created_at DESC
+      LIMIT 15
+    `, [auctionId]);
+
+    const formattedBids = latestBids.map((b) => {
+      const d = new Date(b.created_at);
+      const hh = d.getHours().toString().padStart(2, '0');
+      const mm = d.getMinutes().toString().padStart(2, '0');
+      return {
+        bid_id: b.bid_id,
+        user_id: b.user_id,
+        bid_amount: parseFloat(b.bid_amount),
+        bidder_name: b.full_name || (b.user_id === 2 ? 'สมชาย ใจดี' : 'ผู้เสนอราคา'),
+        formatted_time: `${hh}:${mm}`,
+        created_at: b.created_at,
+        bid_status: b.bid_status
+      };
+    });
+
+    res.json({
+      success: true,
+      message: `เสนอราคา ฿${bidAmt.toLocaleString()} สำเร็จแล้ว!`,
+      new_current_bid: bidAmt,
+      next_min_bid: bidAmt + minIncrement,
+      bids: formattedBids
+    });
+
+  } catch (error) {
+    await connection.rollback();
+    console.error('❌ POST /api/auctions/:id/bid error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// 4. ปิดการประมูลเมื่อหมดเวลา + สร้าง Order ให้ผู้ชนะอัตโนมัติ + แจ้งเตือนผู้ชนะและผู้ร่วมประมูล
+app.post('/api/auctions/:auctionId/close', async (req, res) => {
+  const { auctionId } = req.params;
+
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [rows] = await connection.query(
+      'SELECT * FROM auctions WHERE auction_id = ? FOR UPDATE',
+      [auctionId]
+    );
+
+    if (rows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'ไม่พบรายการประมูล' });
+    }
+
+    const auction = rows[0];
+
+    // ดึงข้อมูลผู้เสนอราคาสูงสุด
+    const [topBids] = await connection.query(`
+      SELECT ab.*, u.full_name, u.phone
+      FROM auction_bids ab
+      LEFT JOIN users u ON ab.user_id = u.user_id
+      WHERE ab.auction_id = ?
+      ORDER BY ab.bid_amount DESC, ab.created_at ASC
+      LIMIT 1
+    `, [auctionId]);
+
+    const winnerBid = topBids.length > 0 ? topBids[0] : null;
+    const winnerUserId = winnerBid ? winnerBid.user_id : (auction.winner_user_id || 2);
+    const winAmount = winnerBid ? parseFloat(winnerBid.bid_amount) : parseFloat(auction.current_bid || auction.start_price);
+    const winnerName = winnerBid?.full_name || 'ผู้ชนะการประมูล';
+
+    // อัปเดตสถานะการประมูลเป็น 'ended'
+    await connection.query(
+      'UPDATE auctions SET auction_status = "ended", winner_user_id = ? WHERE auction_id = ?',
+      [winnerUserId, auctionId]
+    );
+
+    // ตรวจสอบว่ามี Order จากการประมูลนี้อยู่แล้วหรือไม่
+    const [existingOrders] = await connection.query(
+      'SELECT order_id FROM orders WHERE user_id = ? AND order_type = "auction" AND total_amount = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)',
+      [winnerUserId, winAmount]
+    );
+
+    let createdOrderId = null;
+    if (existingOrders.length > 0) {
+      createdOrderId = existingOrders[0].order_id;
+    } else {
+      // สร้าง Order ใหม่
+      const [orderResult] = await connection.query(`
+        INSERT INTO orders (
+          user_id, shop_id, subtotal, delivery_fee, discount, total_amount,
+          order_status, order_type, delivery_type, payment_method, receiver_name,
+          receiver_phone, shipping_address
+        ) VALUES (?, ?, ?, 0, 0, ?, 'pending', 'auction', 'delivery', 'promptpay', ?, ?, 'ที่อยู่ตามโปรไฟล์')
+      `, [
+        winnerUserId,
+        auction.shop_id || 1,
+        winAmount,
+        winAmount,
+        winnerName,
+        winnerBid?.phone || '0812345678'
+      ]);
+
+      createdOrderId = orderResult.insertId;
+
+      // เพิ่ม Order Item
+      await connection.query(`
+        INSERT INTO order_items (order_id, product_id, product_name, price, quantity)
+        VALUES (?, 1, ?, ?, 1)
+      `, [createdOrderId, auction.title, winAmount]);
+    }
+
+    // 1. ส่งแจ้งเตือนไปยังผู้ชนะการประมูล (auction_won)
+    await connection.query(
+      `INSERT INTO notifications (user_id, title, message, type, reference_id, is_read, created_at)
+       VALUES (?, ?, ?, 'auction_won', ?, 0, NOW())`,
+      [
+        winnerUserId,
+        'ยินดีด้วย! คุณชนะการประมูล 🎉',
+        `ยินดีด้วย! คุณชนะการประมูล "${auction.title}" ในราคา ฿${winAmount.toLocaleString()} กรุณาชำระเงินภายในเวลาที่กำหนด`,
+        createdOrderId || auctionId
+      ]
+    );
+    console.log(`🔔 แจ้งเตือนผู้ชนะ User ${winnerUserId} สำหรับห้อง #${auctionId} Order #${createdOrderId}`);
+
+    // 2. ส่งแจ้งเตือนไปยังผู้เข้าร่วมประมูลคนอื่นๆ (auction_lost)
+    const [otherBidders] = await connection.query(
+      'SELECT DISTINCT user_id FROM auction_bids WHERE auction_id = ? AND user_id != ?',
+      [auctionId, winnerUserId]
+    );
+
+    for (const bidder of otherBidders) {
+      await connection.query(
+        `INSERT INTO notifications (user_id, title, message, type, reference_id, is_read, created_at)
+         VALUES (?, ?, ?, 'auction_lost', ?, 0, NOW())`,
+        [
+          bidder.user_id,
+          'การประมูลสิ้นสุดแล้ว',
+          `การประมูล "${auction.title}" สิ้นสุดลงแล้ว คุณไม่ได้รับสิทธิ์ในรอบนี้`,
+          auctionId
+        ]
+      );
+      console.log(`🔔 แจ้งเตือนผู้ไม่ชนะ User ${bidder.user_id} สำหรับห้อง #${auctionId}`);
+    }
+
+    await connection.commit();
+
+    res.json({
+      success: true,
+      message: 'ปิดการประมูลและสร้างคำสั่งซื้อสำเร็จ',
+      winner_user_id: winnerUserId,
+      winner_name: winnerName,
+      win_amount: winAmount,
+      order_id: createdOrderId
+    });
+
+  } catch (error) {
+    await connection.rollback();
+    console.error('❌ POST /api/auctions/:id/close error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// ==========================================
+// 6.4 NOTIFICATIONS APIs (ระบบการแจ้งเตือน)
+// ==========================================
+
+// 1. ดึงรายการแจ้งเตือนทั้งหมดของผู้ใช้ เรียงจากล่าสุด
+app.get('/api/notifications/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  if (!userId || userId === 'undefined' || userId === 'null') {
+    return res.status(400).json({ success: false, message: 'ไม่พบรหัสผู้ใช้งาน' });
+  }
+
+  try {
+    const [rows] = await db.execute(`
+      SELECT 
+        n.*,
+        o.total_amount,
+        o.order_status,
+        o.shop_id,
+        s.name AS shop_name,
+        a.title AS auction_title,
+        a.image_url AS auction_image
+      FROM notifications n
+      LEFT JOIN orders o ON (n.type = 'auction_won' OR n.type = 'order_status') AND n.reference_id = o.order_id
+      LEFT JOIN shops s ON o.shop_id = s.shop_id
+      LEFT JOIN auctions a ON (n.type = 'auction_outbid' OR n.type = 'auction_lost') AND n.reference_id = a.auction_id
+      WHERE n.user_id = ?
+      ORDER BY n.created_at DESC
+    `, [userId]);
+
+    const now = Date.now();
+    const formatted = rows.map(item => {
+      const createdAtTime = new Date(item.created_at).getTime();
+      const diffSec = Math.max(0, Math.floor((now - createdAtTime) / 1000));
+      let timeAgo = 'เมื่อสักครู่';
+
+      if (diffSec < 60) {
+        timeAgo = 'เมื่อสักครู่';
+      } else if (diffSec < 3600) {
+        timeAgo = `${Math.floor(diffSec / 60)} นาทีที่แล้ว`;
+      } else if (diffSec < 86400) {
+        timeAgo = `${Math.floor(diffSec / 3600)} ชั่วโมงที่แล้ว`;
+      } else if (diffSec < 86400 * 7) {
+        timeAgo = `${Math.floor(diffSec / 86400)} วันที่แล้ว`;
+      } else {
+        const d = new Date(item.created_at);
+        timeAgo = `${d.getDate().toString().padStart(2, '0')}/${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getFullYear()}`;
+      }
+
+      return {
+        notification_id: item.notification_id,
+        user_id: item.user_id,
+        title: item.title,
+        message: item.message,
+        type: item.type,
+        reference_id: item.reference_id,
+        is_read: item.is_read === 1 || item.is_read === true,
+        created_at: item.created_at,
+        time_ago: timeAgo,
+        auction_title: item.auction_title || null,
+        auction_image: item.auction_image || null,
+        order: item.total_amount !== null && item.total_amount !== undefined ? {
+          order_id: item.reference_id,
+          total_amount: parseFloat(item.total_amount),
+          order_status: item.order_status,
+          shop_id: item.shop_id,
+          shop_name: item.shop_name
+        } : null
+      };
+    });
+
+    const unreadCount = formatted.filter(n => !n.is_read).length;
+
+    res.json({
+      success: true,
+      notifications: formatted,
+      unread_count: unreadCount,
+      count: unreadCount
+    });
+  } catch (error) {
+    console.error(`❌ GET /api/notifications/${userId} error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 2. ดึงจำนวนการแจ้งเตือนที่ยังไม่ได้อ่าน (Badge Count)
+app.get('/api/notifications/unread-count/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  if (!userId || userId === 'undefined' || userId === 'null') {
+    return res.json({ success: true, count: 0, unread_count: 0 });
+  }
+
+  try {
+    const [rows] = await db.execute(
+      'SELECT COUNT(*) AS unread_count FROM notifications WHERE user_id = ? AND is_read = 0',
+      [userId]
+    );
+
+    const count = rows[0]?.unread_count || 0;
+    res.json({
+      success: true,
+      count: parseInt(count, 10),
+      unread_count: parseInt(count, 10)
+    });
+  } catch (error) {
+    console.error(`❌ GET /api/notifications/unread-count/${userId} error:`, error.message);
+    res.status(500).json({ success: false, count: 0, unread_count: 0, error: error.message });
+  }
+});
+
+// 3. อัปเดตสถานะเป็นอ่านแล้ว (เดี่ยว)
+app.put('/api/notifications/:id/read', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    await db.execute('UPDATE notifications SET is_read = 1 WHERE notification_id = ?', [id]);
+    res.json({ success: true, message: 'อัปเดตสถานะเป็นอ่านแล้ว' });
+  } catch (error) {
+    console.error(`❌ PUT /api/notifications/${id}/read error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 4. อัปเดตสถานะเป็นอ่านแล้วทั้งหมด (Mark All as Read)
+app.put('/api/notifications/read-all/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    await db.execute('UPDATE notifications SET is_read = 1 WHERE user_id = ?', [userId]);
+    res.json({ success: true, message: 'ทำเครื่องหมายว่าอ่านทั้งหมดแล้ว' });
+  } catch (error) {
+    console.error(`❌ PUT /api/notifications/read-all/${userId} error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 5. ลบการแจ้งเตือน
+app.delete('/api/notifications/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    await db.execute('DELETE FROM notifications WHERE notification_id = ?', [id]);
+    res.json({ success: true, message: 'ลบการแจ้งเตือนเรียบร้อยแล้ว' });
+  } catch (error) {
+    console.error(`❌ DELETE /api/notifications/${id} error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// 6.5 REVIEWS & REWARDS APIs
+// ==========================================
+
+// 1. บันทึกรีวิวและคะแนนดาว
+app.post('/api/reviews', async (req, res) => {
+  const { order_id, user_id, product_id, shop_id, rating, comment, image_url } = req.body;
+  try {
+    const [result] = await db.execute(
+      `INSERT INTO reviews (order_id, user_id, product_id, shop_id, rating, comment, image_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [order_id || null, user_id || 2, product_id || null, shop_id || 1, rating || 5, comment || '', image_url || null]
+    );
+
+    // ให้คะแนน Point โบนัสแก่ผู้ใช้ 50 คะแนนเมื่อรีวิว
+    await db.execute(
+      `INSERT INTO user_points (user_id, points) VALUES (?, 1300)
+       ON DUPLICATE KEY UPDATE points = points + 50`,
+      [user_id || 2]
+    );
+
+    res.json({ success: true, message: 'ส่งรีวิวสำเร็จ ขอบคุณสำหรับคำติชม!', review_id: result.insertId });
+  } catch (error) {
+    console.error('❌ POST /api/reviews error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 2. ดึงรีวิวของสินค้า / ร้าน
+app.get('/api/reviews/product/:productId', async (req, res) => {
+  const { productId } = req.params;
+  try {
+    const [reviews] = await db.execute(
+      `SELECT r.*, u.full_name AS user_name 
+       FROM reviews r 
+       LEFT JOIN users u ON r.user_id = u.user_id
+       WHERE r.product_id = ? 
+       ORDER BY r.created_at DESC`,
+      [productId]
+    );
+    res.json({ success: true, reviews });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 3. ดึงคะแนนสะสมของผู้ใช้
+app.get('/api/points/:userId', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const [rows] = await db.execute('SELECT points FROM user_points WHERE user_id = ?', [userId]);
+    const points = rows.length > 0 ? rows[0].points : 1250;
+    res.json({
+      success: true,
+      points,
+      history: [
+        { id: 1, title: 'ได้รับคะแนนจากการสั่งซื้ออาหาร #24', points: '+25', date: '20 ส.ค. 2569' },
+        { id: 2, title: 'ได้รับคะแนนโบนัสต้อนรับสมาชิกใหม่', points: '+1,000', date: '15 ส.ค. 2569' },
+        { id: 3, title: 'รีวิวอาหารได้รับพอยท์', points: '+50', date: '18 ส.ค. 2569' },
+        { id: 4, title: 'ลดขยะอาหารพรีเมียม ช่วยสิ่งแวดล้อม', points: '+175', date: '19 ส.ค. 2569' }
+      ]
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 4. ติดตามสถานะออเดอร์ (Live Order Tracking)
+app.get('/api/orders/:orderId/tracking', async (req, res) => {
+  const { orderId } = req.params;
+  try {
+    const [orders] = await db.execute(
+      `SELECT 
+        o.*, 
+        s.name AS shop_name,
+        s.image_url AS shop_image,
+        del.delivery_status,
+        del.assigned_at,
+        del.delivered_at,
+        u_rider.full_name AS rider_name,
+        u_rider.phone AS rider_phone,
+        r.vehicle_type,
+        r.license_plate
+      FROM orders o
+      LEFT JOIN shops s ON o.shop_id = s.shop_id
+      LEFT JOIN deliveries del ON o.order_id = del.order_id
+      LEFT JOIN riders r ON del.rider_id = r.rider_id
+      LEFT JOIN users u_rider ON r.user_id = u_rider.user_id
+      WHERE o.order_id = ?`,
+      [orderId]
+    );
+
+    if (orders.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบคำสั่งซื้อ' });
+    }
+
+    const order = orders[0];
+    const [items] = await db.execute(
+      `SELECT oi.*, p.name AS db_product_name, p.image_url AS product_image
+       FROM order_items oi
+       LEFT JOIN products p ON oi.product_id = p.product_id
+       WHERE oi.order_id = ?`,
+      [orderId]
+    );
+
+    const trackingData = {
+      order_id: order.order_id,
+      ref_code: `#SD-99${order.order_id}`,
+      order_status: order.order_status,
+      delivery_status: order.delivery_status || 'picked_up',
+      status_title: order.order_status === 'completed' ? 'สินค้ามาถึงแล้ว' : 'คนขับกำลังไปรับสินค้า',
+      eta_text: '12:45 น.',
+      eta_minutes: '5 นาที',
+      shop_name: order.shop_name || 'ร้านอาหารไทยรสเด็ด',
+      shop_image: order.shop_image,
+      shipping_address: order.shipping_address,
+      receiver_name: order.receiver_name,
+      receiver_phone: order.receiver_phone,
+      rider: {
+        name: order.rider_name || 'สมชาย ใจดี',
+        phone: order.rider_phone || '081-234-5678',
+        rating: '4.9',
+        vehicle: order.license_plate ? `ทะเบียน ${order.license_plate} (${order.vehicle_type || 'รถจักรยานยนต์'})` : 'ทะเบียน กข-1234 (รถจักรยานยนต์)',
+        tag: 'ฉีดวัคซีนแล้ว 3 เข็ม',
+        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200'
+      },
+      steps: [
+        {
+          id: 1,
+          title: 'กำลังจัดเตรียมสินค้า',
+          subtitle: 'เสร็จสิ้นเมื่อ 12:10 น.',
+          completed: true,
+          current: false,
+          icon: 'check'
+        },
+        {
+          id: 2,
+          title: 'คนขับกำลังไปรับสินค้า',
+          subtitle: 'กำลังดำเนินการ',
+          completed: false,
+          current: true,
+          icon: 'two-wheeler'
+        },
+        {
+          id: 3,
+          title: 'กำลังนำส่งสินค้า',
+          subtitle: 'รอการดำเนินการ',
+          completed: false,
+          current: false,
+          icon: 'near-me'
+        },
+        {
+          id: 4,
+          title: 'สินค้ามาถึงแล้ว',
+          subtitle: 'จัดส่งสำเร็จเมื่อ 12:45 น.',
+          completed: false,
+          current: false,
+          icon: 'check-circle'
+        }
+      ],
+      items: items.map(item => ({
+        ...item,
+        product_name: item.product_name || item.db_product_name || 'สินค้า'
+      }))
+    };
+
+    res.json({ success: true, tracking: trackingData });
+  } catch (error) {
+    console.error('❌ Tracking error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// 7. MERCHANT / SHOP MANAGEMENT APIs
+// ==========================================
+
+// ดึงรายการหมวดหมู่สินค้าทั้งหมด
+app.get('/api/categories', async (req, res) => {
+  try {
+    const [categories] = await db.execute('SELECT * FROM categories ORDER BY category_id ASC');
+    res.json({ success: true, categories });
+  } catch (error) {
+    console.error('❌ GET /api/categories error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ดึงรายการร้านค้าทั้งหมด
+// ตรวจสอบว่าผู้ใช้มีร้านค้าหรือไม่
+app.get('/api/users/:userId/shop', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const [shops] = await db.execute('SELECT * FROM shops WHERE owner_id = ? LIMIT 1', [userId]);
+    if (shops.length > 0) {
+      res.json({ success: true, hasShop: true, shop: shops[0] });
+    } else {
+      res.json({ success: true, hasShop: false });
+    }
+  } catch (error) {
+    console.error(`❌ GET /api/users/${userId}/shop error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// สมัครร้านค้าใหม่
+app.post('/api/shops/register', async (req, res) => {
+  const { owner_id, name, description, category_id, address, latitude, longitude, bank_name, bank_account, id_card_image, bookbank_image } = req.body;
+  
+  if (!owner_id || !name || !address) {
+    return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
+  }
+
+  try {
+    const [check] = await db.execute('SELECT shop_id, status FROM shops WHERE owner_id = ?', [owner_id]);
+    
+    if (check.length > 0) {
+      if (check[0].status === 'rejected') {
+        await db.execute(
+          `UPDATE shops SET name=?, description=?, category_id=?, address=?, latitude=?, longitude=?, bank_name=?, bank_account=?, id_card_image=?, bookbank_image=?, status='pending' WHERE owner_id=?`,
+          [name, description || null, category_id || null, address, latitude || null, longitude || null, bank_name || null, bank_account || null, id_card_image || null, bookbank_image || null, owner_id]
+        );
+        return res.json({ success: true, message: 'ส่งข้อมูลสมัครใหม่สำเร็จ รอการตรวจสอบ', shop_id: check[0].shop_id });
+      } else {
+        return res.status(400).json({ success: false, message: 'คุณมีร้านค้าอยู่แล้ว' });
+      }
+    }
+
+    const [result] = await db.execute(
+      `INSERT INTO shops (owner_id, name, description, category_id, address, latitude, longitude, bank_name, bank_account, id_card_image, bookbank_image, status) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`, 
+      [owner_id, name, description || null, category_id || null, address, latitude || null, longitude || null, bank_name || null, bank_account || null, id_card_image || null, bookbank_image || null]
+    );
+
+    res.json({ success: true, message: 'สมัครร้านค้าสำเร็จ รอการตรวจสอบ', shop_id: result.insertId });
+  } catch (error) {
+    console.error('Register Shop Error:', error);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดของเซิร์ฟเวอร์', error: error.message });
+  }
+});
+
+app.get('/api/shops/check-pending/:userId', async (req, res) => {
+  try {
+    const [shops] = await db.execute('SELECT status FROM shops WHERE owner_id = ? AND status = "pending"', [req.params.userId]);
+    if (shops.length > 0) {
+      res.json({ success: true, isPending: true });
+    } else {
+      res.json({ success: true, isPending: false });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/shops/nearby', async (req, res) => {
+  try {
+    const [shops] = await db.execute('SELECT shop_id, name, image_url, rating, distance, tag1, tag2 FROM shops ORDER BY shop_id ASC LIMIT 10');
+    res.json(shops);
+  } catch (error) {
+    console.error('API /api/shops/nearby error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/shops', async (req, res) => {
+  try {
+    const [shops] = await db.execute('SELECT * FROM shops ORDER BY shop_id ASC');
+    res.json({ success: true, shops });
+  } catch (error) {
+    console.error('❌ GET /api/shops error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ดึงข้อมูลร้านค้า + ยอดเงินในกระเป๋า
+app.get('/api/shops/:shopId', async (req, res) => {
+  const { shopId } = req.params;
+  try {
+    const [shops] = await db.execute('SELECT * FROM shops WHERE shop_id = ?', [shopId]);
+    if (shops.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบร้านค้านี้' });
+    }
+
+    const shop = shops[0];
+    const [wallets] = await db.execute('SELECT balance FROM shop_wallets WHERE shop_id = ?', [shopId]);
+    const balance = wallets.length > 0 ? parseFloat(wallets[0].balance) : 0;
+
+    res.json({
+      success: true,
+      shop: {
+        ...shop,
+        balance
+      }
+    });
+  } catch (error) {
+    console.error(`❌ GET /api/shops/${shopId} error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// แก้ไขข้อมูลร้านค้า
+app.put('/api/shops/:shopId', async (req, res) => {
+  const { shopId } = req.params;
+  const { name, image_url, tag1, tag2, promptpay_number, distance } = req.body;
+
+  try {
+    await db.execute(
+      `UPDATE shops 
+       SET name = COALESCE(?, name),
+           image_url = COALESCE(?, image_url),
+           tag1 = COALESCE(?, tag1),
+           tag2 = COALESCE(?, tag2),
+           promptpay_number = COALESCE(?, promptpay_number),
+           distance = COALESCE(?, distance)
+       WHERE shop_id = ?`,
+      [name, image_url, tag1, tag2, promptpay_number, distance, shopId]
+    );
+
+    res.json({ success: true, message: 'บันทึกข้อมูลร้านค้าสำเร็จ' });
+  } catch (error) {
+    console.error(`❌ PUT /api/shops/${shopId} error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// สถิติภาพรวมของร้านค้า (Dashboard Stats)
+app.get('/api/shops/:shopId/stats', async (req, res) => {
+  const { shopId } = req.params;
+  try {
+    // 1. ยอดขายรวม (total revenue)
+    const [salesRow] = await db.execute(
+      `SELECT COALESCE(SUM(total_amount), 0) AS total_revenue, COUNT(*) AS total_orders 
+       FROM orders 
+       WHERE shop_id = ? AND order_status NOT IN ('cancelled')`,
+      [shopId]
+    );
+
+    // 2. ออเดอร์ที่รอดำเนินการ (pending + paid + preparing)
+    const [pendingRow] = await db.execute(
+      `SELECT COUNT(*) AS pending_orders 
+       FROM orders 
+       WHERE shop_id = ? AND order_status IN ('pending', 'paid', 'preparing')`,
+      [shopId]
+    );
+
+    // 3. ยอดขายวันนี้ (today revenue)
+    const [todayRow] = await db.execute(
+      `SELECT COALESCE(SUM(total_amount), 0) AS today_revenue 
+       FROM orders 
+       WHERE shop_id = ? AND DATE(created_at) = CURDATE() AND order_status NOT IN ('cancelled')`,
+      [shopId]
+    );
+
+    // 4. จำนวนสินค้าทั้งหมดของร้าน
+    const [productsRow] = await db.execute(
+      `SELECT COUNT(*) AS total_products FROM products WHERE shop_id = ?`,
+      [shopId]
+    );
+
+    // 5. ยอดเงินคงเหลือใน Wallet
+    const [walletRow] = await db.execute(
+      `SELECT balance FROM shop_wallets WHERE shop_id = ?`,
+      [shopId]
+    );
+    const balance = walletRow.length > 0 ? parseFloat(walletRow[0].balance) : 0;
+
+    res.json({
+      success: true,
+      stats: {
+        total_revenue: parseFloat(salesRow[0].total_revenue) || 0,
+        total_orders: salesRow[0].total_orders || 0,
+        pending_orders: pendingRow[0].pending_orders || 0,
+        today_revenue: parseFloat(todayRow[0].today_revenue) || 0,
+        total_products: productsRow[0].total_products || 0,
+        balance: balance
+      }
+    });
+  } catch (error) {
+    console.error(`❌ GET /api/shops/${shopId}/stats error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ดึงรายการสินค้าทั้งหมดของร้าน
+app.get('/api/shops/:shopId/products', async (req, res) => {
+  const { shopId } = req.params;
+  try {
+    const [products] = await db.execute(`
+      SELECT 
+        p.*, 
+        c.name AS category_name, 
+        c.icon_name AS category_icon
+      FROM products p
+      LEFT JOIN categories c ON p.category_id = c.category_id
+      WHERE p.shop_id = ?
+      ORDER BY p.product_id DESC
+    `, [shopId]);
+
+    const formattedProducts = products.map(p => {
+      const rawExpires = p.deal_end_time;
+      const formattedExpiresAt = rawExpires ? new Date(rawExpires).toISOString() : null;
+      return {
+        ...p,
+        deal_end_time: formattedExpiresAt,
+        expires_at: formattedExpiresAt
+      };
+    });
+
+    res.json({ success: true, products: formattedProducts });
+  } catch (error) {
+    console.error(`❌ GET /api/shops/${shopId}/products error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ดึงข้อมูลสินค้ารายชิ้น (สำหรับฟอร์มแก้ไข)
+app.get('/api/shops/:shopId/products/:productId', async (req, res) => {
+  const { shopId, productId } = req.params;
+  try {
+    const [products] = await db.execute(
+      'SELECT * FROM products WHERE product_id = ? AND shop_id = ?',
+      [productId, shopId]
+    );
+
+    if (products.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบสินค้า' });
+    }
+
+    const product = products[0];
+    const rawExpires = product.deal_end_time;
+    const formattedExpiresAt = rawExpires ? new Date(rawExpires).toISOString() : null;
+
+    res.json({
+      success: true,
+      product: {
+        ...product,
+        deal_end_time: formattedExpiresAt
+      }
+    });
+  } catch (error) {
+    console.error(`❌ GET /api/shops/${shopId}/products/${productId} error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// เพิ่มสินค้าใหม่
+app.post('/api/shops/:shopId/products', async (req, res) => {
+  const { shopId } = req.params;
+  const {
+    category_id,
+    name,
+    original_price,
+    discount_price,
+    discount_percent,
+    expiry_text,
+    image_url,
+    description,
+    freshness,
+    shipping_type,
+    deal_end_time,
+    stock_quantity,
+    is_auction,
+    expiry_time
+  } = req.body;
+
+  if (!name || original_price === undefined || discount_price === undefined) {
+    return res.status(400).json({ success: false, message: 'กรุณากรอกชื่อสินค้า และราคาให้ครบถ้วน' });
+  }
+
+  // คำนวณ % ส่วนลดหากไม่ได้ส่งมา
+  let calculatedDiscountPercent = discount_percent;
+  if (!calculatedDiscountPercent && original_price > 0 && discount_price >= 0) {
+    calculatedDiscountPercent = Math.round(((original_price - discount_price) / original_price) * 100);
+  }
+
+  // แปลงรูปแบบเวลา deal_end_time ถ้ามี
+  let formattedDealEndTime = deal_end_time ? new Date(deal_end_time).toISOString().slice(0, 19).replace('T', ' ') : null;
+  let formattedExpiryTime = expiry_time ? new Date(expiry_time).toISOString().slice(0, 19).replace('T', ' ') : null;
+
+  try {
+    const [result] = await db.execute(
+      `INSERT INTO products (
+        shop_id, category_id, name, original_price, discount_price, 
+        discount_percent, expiry_text, image_url, description, 
+        freshness, shipping_type, deal_end_time,
+        stock_quantity, is_auction, expiry_time
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        shopId,
+        category_id || 1,
+        name,
+        original_price || 0,
+        discount_price || 0,
+        calculatedDiscountPercent || 0,
+        expiry_text || 'หมดอายุในวันนี้',
+        image_url || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500',
+        description || '',
+        freshness || 'ทำสดใหม่ทุกเช้า',
+        shipping_type || 'ควบคุมอุณหภูมิ',
+        formattedDealEndTime,
+        stock_quantity || 0,
+        is_auction ? 1 : 0,
+        formattedExpiryTime
+      ]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'เพิ่มสินค้าสำเร็จ',
+      product_id: result.insertId
+    });
+  } catch (error) {
+    console.error(`❌ POST /api/shops/${shopId}/products error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// แก้ไขสินค้าเดิม
+app.put('/api/shops/:shopId/products/:productId', async (req, res) => {
+  const { shopId, productId } = req.params;
+  const {
+    category_id,
+    name,
+    original_price,
+    discount_price,
+    discount_percent,
+    expiry_text,
+    image_url,
+    description,
+    freshness,
+    shipping_type,
+    deal_end_time,
+    stock_quantity,
+    is_auction,
+    expiry_time
+  } = req.body;
+
+  let calculatedDiscountPercent = discount_percent;
+  if (!calculatedDiscountPercent && original_price > 0 && discount_price >= 0) {
+    calculatedDiscountPercent = Math.round(((original_price - discount_price) / original_price) * 100);
+  }
+
+  let formattedDealEndTime = deal_end_time ? new Date(deal_end_time).toISOString().slice(0, 19).replace('T', ' ') : null;
+  let formattedExpiryTime = expiry_time ? new Date(expiry_time).toISOString().slice(0, 19).replace('T', ' ') : null;
+
+  try {
+    await db.execute(
+      `UPDATE products SET
+        category_id = COALESCE(?, category_id),
+        name = COALESCE(?, name),
+        original_price = COALESCE(?, original_price),
+        discount_price = COALESCE(?, discount_price),
+        discount_percent = COALESCE(?, discount_percent),
+        expiry_text = COALESCE(?, expiry_text),
+        image_url = COALESCE(?, image_url),
+        description = COALESCE(?, description),
+        freshness = COALESCE(?, freshness),
+        shipping_type = COALESCE(?, shipping_type),
+        deal_end_time = COALESCE(?, deal_end_time),
+        stock_quantity = COALESCE(?, stock_quantity),
+        is_auction = COALESCE(?, is_auction),
+        expiry_time = COALESCE(?, expiry_time)
+      WHERE product_id = ? AND shop_id = ?`,
+      [
+        category_id,
+        name,
+        original_price,
+        discount_price,
+        calculatedDiscountPercent,
+        expiry_text,
+        image_url,
+        description,
+        freshness,
+        shipping_type,
+        formattedDealEndTime,
+        stock_quantity,
+        is_auction !== undefined ? (is_auction ? 1 : 0) : null,
+        formattedExpiryTime,
+        productId,
+        shopId
+      ]
+    );
+
+    res.json({ success: true, message: 'แก้ไขข้อมูลสินค้าสำเร็จ' });
+  } catch (error) {
+    console.error(`❌ PUT /api/shops/${shopId}/products/${productId} error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ลบสินค้า
+app.delete('/api/shops/:shopId/products/:productId', async (req, res) => {
+  const { shopId, productId } = req.params;
+  try {
+    const [result] = await db.execute(
+      'DELETE FROM products WHERE product_id = ? AND shop_id = ?',
+      [productId, shopId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบสินค้า หรือไม่มีสิทธิ์ลบสินค้านี้' });
+    }
+
+    res.json({ success: true, message: 'ลบสินค้าเรียบร้อยแล้ว' });
+  } catch (error) {
+    console.error(`❌ DELETE /api/shops/${shopId}/products/${productId} error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ดึงรายการออเดอร์เข้าของร้านค้า (Incoming Orders)
+app.get('/api/shops/:shopId/orders', async (req, res) => {
+  const { shopId } = req.params;
+  const { status } = req.query;
+
+  try {
+    let query = `
+      SELECT 
+        o.*,
+        u.full_name AS customer_name,
+        u.phone AS customer_phone,
+        u.email AS customer_email
+      FROM orders o
+      LEFT JOIN users u ON o.user_id = u.user_id
+      WHERE o.shop_id = ?
+    `;
+    const params = [shopId];
+
+    if (status && status !== 'all') {
+      query += ` AND o.order_status = ?`;
+      params.push(status);
+    }
+
+    query += ` ORDER BY o.created_at DESC`;
+
+    const [orders] = await db.execute(query, params);
+
+    // ดึง order_items สำหรับแต่ละออเดอร์
+    const formattedOrders = [];
+    for (const order of orders) {
+      const [items] = await db.execute(
+        `SELECT oi.*, p.name AS db_product_name, p.image_url AS product_image
+         FROM order_items oi
+         LEFT JOIN products p ON oi.product_id = p.product_id
+         WHERE oi.order_id = ?`,
+        [order.order_id]
+      );
+
+      formattedOrders.push({
+        ...order,
+        items: items.map(item => ({
+          ...item,
+          product_name: item.product_name || item.db_product_name || 'สินค้า'
+        }))
+      });
+    }
+
+    res.json({ success: true, orders: formattedOrders });
+  } catch (error) {
+    console.error(`❌ GET /api/shops/${shopId}/orders error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// อัปเดตสถานะคำสั่งซื้อ (Order Status Update)
+app.put('/api/orders/:orderId/status', async (req, res) => {
+  const { orderId } = req.params;
+  const { order_status } = req.body;
+
+  const validStatuses = ['pending', 'paid', 'preparing', 'ready', 'delivering', 'completed', 'cancelled'];
+  if (!validStatuses.includes(order_status)) {
+    return res.status(400).json({ success: false, message: 'สถานะคำสั่งซื้อไม่ถูกต้อง' });
+  }
+
+  try {
+    await db.execute(
+      'UPDATE orders SET order_status = ? WHERE order_id = ?',
+      [order_status, orderId]
+    );
+
+    res.json({ success: true, message: `อัปเดตสถานะออเดอร์เป็น ${order_status} สำเร็จ` });
+  } catch (error) {
+    console.error(`❌ PUT /api/orders/${orderId}/status error:`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// SEARCH API
+// ==========================================
+app.get('/api/search', async (req, res) => {
+  const { keyword } = req.query;
+  if (!keyword) {
+    return res.status(400).json({ success: false, message: 'กรุณาระบุคำค้นหา' });
+  }
+
+  try {
+    const searchParam = `%${keyword}%`;
+
+    // 1. ค้นหาร้านค้า
+    const [shops] = await db.execute(
+      'SELECT shop_id, name, image_url, distance, rating FROM shops WHERE status = "approved" AND name LIKE ?',
+      [searchParam]
+    );
+
+    // 2. ค้นหาสินค้า
+    const [products] = await db.execute(
+      `SELECT p.*, s.name AS shop_name 
+       FROM products p 
+       LEFT JOIN shops s ON p.shop_id = s.shop_id 
+       WHERE p.name LIKE ? AND s.status = 'approved'`,
+      [searchParam]
+    );
+
+    res.json({
+      success: true,
+      shops,
+      products
+    });
+  } catch (error) {
+    console.error('Search API Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// ADMIN API
+// ==========================================
+
+// 1. API จัดการผู้ใช้ (User Management)
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const [results] = await db.execute(
+      `SELECT user_id, full_name, email, phone, role, status, avatar_url, created_at FROM users ORDER BY created_at DESC`
+    );
+    res.json(results);
+  } catch (error) {
+    console.error('API /api/admin/users Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/users/:id/status', async (req, res) => {
+  const { status } = req.body;
+  try {
+    const [result] = await db.execute(
+      `UPDATE users SET status = ? WHERE user_id = ?`,
+      [status, req.params.id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+    }
+    res.json({ success: true, message: 'อัปเดตสถานะสำเร็จ' });
+  } catch (error) {
+    console.error('API /api/admin/users/:id/status Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// 2. API อนุมัติร้านใหม่ (Shop Approvals)
+app.get('/api/admin/shops/pending', async (req, res) => {
+  try {
+    const [results] = await db.execute(`
+      SELECT shops.shop_id, shops.name AS shop_name, users.full_name AS owner_name, users.email AS owner_email, users.phone AS owner_phone, shops.created_at, shops.id_card_image, shops.bookbank_image, shops.bank_name, shops.bank_account, shops.address, shops.description, shops.latitude, shops.longitude FROM shops LEFT JOIN users ON shops.owner_id = users.user_id WHERE shops.status = 'pending' ORDER BY shops.created_at DESC
+    `);
+    res.json(results);
+  } catch (error) {
+    console.error('API /api/admin/shops/pending Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/shops/:id/approve', async (req, res) => {
+  try {
+    const [result] = await db.execute(`UPDATE shops SET status = "approved" WHERE shop_id = ?`, [req.params.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'ไม่พบร้านค้า' });
+    res.json({ success: true, message: 'อนุมัติร้านค้าเรียบร้อยแล้ว' });
+  } catch (error) {
+    console.error('API /api/admin/shops/:id/approve Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/shops/:id/reject', async (req, res) => {
+  const { reason } = req.body;
+  try {
+    const [result] = await db.execute(`UPDATE shops SET status = "rejected", reject_reason = ? WHERE shop_id = ?`, [reason || null, req.params.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'ไม่พบร้านค้า' });
+    res.json({ success: true, message: 'ปฏิเสธร้านค้าเรียบร้อยแล้ว' });
+  } catch (error) {
+    console.error('API /api/admin/shops/:id/reject Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// 3. API จัดการร้านค้า (Shop Management)
+app.get('/api/admin/shops', async (req, res) => {
+  try {
+    const [results] = await db.execute(`
+      SELECT shop_id, name, rating, address, status, created_at 
+      FROM shops 
+      WHERE status = 'approved' OR status = 'pending' 
+      ORDER BY created_at DESC
+    `);
+    res.json(results);
+  } catch (error) {
+    console.error('API /api/admin/shops Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/admin/shops/:id/insights', async (req, res) => {
+  const shopId = req.params.id;
+  try {
+    const [shopInfo] = await db.execute('SELECT s.*, u.full_name AS owner_name, u.phone AS owner_phone, u.email AS owner_email FROM shops s LEFT JOIN users u ON s.owner_id = u.user_id WHERE s.shop_id = ?', [shopId]);
+    
+    if (shopInfo.length === 0) {
+      return res.status(404).json({ error: 'Shop not found' });
+    }
+
+    const [salesKpi] = await db.execute('SELECT COUNT(order_id) AS total_orders, SUM(total_amount) AS total_revenue FROM orders WHERE shop_id = ? AND order_status IN (\'completed\', \'paid\')', [shopId]);
+    
+    const [products] = await db.execute('SELECT product_id, name, description, original_price, discount_price AS price, stock_quantity AS stock, image_url, expiry_time AS expiration_date, category_id FROM products WHERE shop_id = ? ORDER BY product_id DESC LIMIT 10', [shopId]);
+    
+    const [weeklyChart] = await db.execute('SELECT DATE_FORMAT(created_at, \'%d %b\') AS date, SUM(total_amount) AS total FROM orders WHERE shop_id = ? AND order_status IN (\'completed\', \'paid\') AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) GROUP BY DATE(created_at) ORDER BY DATE(created_at)', [shopId]);
+
+    res.json({
+      shop: shopInfo[0],
+      kpi: {
+        total_orders: salesKpi[0].total_orders || 0,
+        total_revenue: salesKpi[0].total_revenue || 0
+      },
+      products: products || [],
+      weekly_sales: weeklyChart || []
+    });
+  } catch (error) {
+    console.error('API /api/admin/shops/:id/insights Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.put('/api/admin/shops/:id/suspend', async (req, res) => {
+  try {
+    const [result] = await db.execute('UPDATE shops SET status = "suspended" WHERE shop_id = ?', [req.params.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Shop not found' });
+    res.json({ success: true, message: 'Shop suspended successfully' });
+  } catch (error) {
+    console.error('API /api/admin/shops/:id/suspend Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Dashboard Stats
+app.get('/api/admin/dashboard', async (req, res) => {
+  try {
+    const [[{ total_sales }]] = await db.execute(`SELECT SUM(total_amount) AS total_sales FROM orders WHERE order_status = 'completed' OR order_status = 'paid'`);
+    const [[{ total_orders }]] = await db.execute(`SELECT COUNT(*) AS total_orders FROM orders`);
+    const [[{ total_users }]] = await db.execute(`SELECT COUNT(*) AS total_users FROM users`);
+    const [[{ total_shops }]] = await db.execute(`SELECT COUNT(*) AS total_shops FROM shops`);
+    
+    const [top_shops] = await db.execute(`SELECT shops.name AS shop_name, SUM(orders.total_amount) AS total_sales FROM orders JOIN shops ON orders.shop_id = shops.shop_id GROUP BY shops.shop_id ORDER BY total_sales DESC LIMIT 5`);
+    
+    const [recent_orders] = await db.execute(`SELECT orders.order_id, shops.name AS shop_name, orders.total_amount FROM orders JOIN shops ON orders.shop_id = shops.shop_id ORDER BY orders.created_at DESC LIMIT 5`);
+
+    
+    const period = req.query.period || '30';
+    let salesTrendQuery = '';
+    
+    if (period === '7') {
+      salesTrendQuery = `SELECT DATE_FORMAT(created_at, '%d %b') AS name, SUM(total_amount) AS total FROM orders WHERE order_status IN ('completed', 'paid') AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) GROUP BY DATE(created_at) ORDER BY DATE(created_at)`;
+    } else if (period === '365') {
+      salesTrendQuery = `SELECT DATE_FORMAT(created_at, '%b %Y') AS name, SUM(total_amount) AS total FROM orders WHERE order_status IN ('completed', 'paid') AND created_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) GROUP BY MONTH(created_at), YEAR(created_at) ORDER BY YEAR(created_at), MONTH(created_at)`;
+    } else {
+      salesTrendQuery = `SELECT DATE_FORMAT(created_at, '%d %b') AS name, SUM(total_amount) AS total FROM orders WHERE order_status IN ('completed', 'paid') AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) GROUP BY DATE(created_at) ORDER BY DATE(created_at)`;
+    }
+    
+    const [sales_trend] = await db.execute(salesTrendQuery);
+
+    
+    const [category_stats] = await db.execute(`SELECT shops.tag1 AS name, COUNT(shops.shop_id) AS value FROM shops WHERE shops.tag1 IS NOT NULL AND shops.tag1 != '' GROUP BY shops.tag1`);
+
+    res.json({
+      stats: {
+        total_sales: total_sales || 0,
+        total_orders: total_orders || 0,
+        total_users: total_users || 0,
+        total_shops: total_shops || 0
+      },
+      top_shops: top_shops,
+      recent_orders: recent_orders,
+      sales_trend: sales_trend,
+      category_stats: category_stats
+    });
+  } catch (error) {
+    console.error('Admin Dashboard Error:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+app.get('/api/admin/users/:id/details', async (req, res) => {
+  const userId = req.params.id;
+  try {
+    const [user] = await db.execute(`SELECT user_id, full_name, email, phone, role, status, created_at, avatar_url FROM users WHERE user_id = ?`, [userId]);
+    
+    if (user.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const [stats] = await db.execute(`SELECT COUNT(order_id) AS total_orders, SUM(total_amount) AS total_spent, AVG(total_amount) AS avg_order_value FROM orders WHERE user_id = ? AND (order_status = 'completed' OR order_status = 'paid')`, [userId]);
+    
+    const [recent_orders] = await db.execute(`SELECT order_id, total_amount, order_status, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 5`, [userId]);
+    
+    let addresses = [];
+    try {
+      const [addr] = await db.execute(`SELECT address_line, province, zip_code FROM user_addresses WHERE user_id = ? LIMIT 3`, [userId]);
+      addresses = addr;
+    } catch (e) {
+      try {
+        const [fallbackAddr] = await db.execute(`SELECT DISTINCT shipping_address AS address_line FROM orders WHERE user_id = ? AND shipping_address IS NOT NULL LIMIT 3`, [userId]);
+        addresses = fallbackAddr;
+      } catch (err) {}
+    }
+
+    res.json({
+      user: user[0],
+      stats: {
+        total_orders: stats[0].total_orders || 0,
+        total_spent: stats[0].total_spent || 0,
+        avg_order_value: stats[0].avg_order_value || 0
+      },
+      recent_orders: recent_orders,
+      addresses: addresses
+    });
+  } catch (error) {
+    console.error('Error fetching user details:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+app.get('/api/seller/dashboard/:owner_id', async (req, res) => {
+  try {
+    const owner_id = req.params.owner_id;
+    
+    // 1. Get Shop Info
+    const [shopData] = await db.execute('SELECT shop_id, name, status FROM shops WHERE owner_id = ?', [owner_id]);
+    if (shopData.length === 0) {
+      return res.json({ success: false, message: 'Shop not found' });
+    }
+    const shop = shopData[0];
+    const shop_id = shop.shop_id;
+
+    // 2. Get Today's Sales
+    const [statsData] = await db.execute(`
+      SELECT SUM(total_amount) AS today_sales, COUNT(order_id) AS today_orders 
+      FROM orders 
+      WHERE shop_id = ? AND DATE(created_at) = CURDATE() AND order_status IN ('completed', 'paid')
+    `, [shop_id]);
+    
+    const stats = {
+      today_sales: statsData[0].today_sales || 0,
+      today_orders: statsData[0].today_orders || 0
+    };
+
+    // 3. Get Recent Orders
+    const [recentOrders] = await db.execute(`
+      SELECT o.order_id, o.total_amount, o.order_status, o.created_at, oi.product_id, p.image_url, p.name as product_name
+      FROM orders o
+      LEFT JOIN order_items oi ON o.order_id = oi.order_id
+      LEFT JOIN products p ON oi.product_id = p.product_id
+      WHERE o.shop_id = ? 
+      ORDER BY o.created_at DESC 
+      LIMIT 5
+    `, [shop_id]);
+
+    const formattedOrders = [];
+    const orderMap = new Map();
+    
+    recentOrders.forEach(row => {
+      if (!orderMap.has(row.order_id)) {
+        orderMap.set(row.order_id, {
+          order_id: row.order_id,
+          total_amount: row.total_amount,
+          order_status: row.order_status,
+          created_at: row.created_at,
+          image_url: row.image_url,
+          product_name: row.product_name
+        });
+        formattedOrders.push(orderMap.get(row.order_id));
+      }
+    });
+
+    res.json({
+      success: true,
+      shop: shop,
+      stats: stats,
+      recentOrders: formattedOrders
+    });
+  } catch (error) {
+    console.error('API /api/seller/dashboard error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Wallet API for Seller
+app.get('/api/seller/wallet/:shop_id', async (req, res) => {
+  try {
+    const shop_id = req.params.shop_id;
+    await db.execute('INSERT IGNORE INTO shop_wallets (shop_id, balance) VALUES (?, 0)', [shop_id]);
+    const [walletData] = await db.execute('SELECT balance FROM shop_wallets WHERE shop_id = ?', [shop_id]);
+    const balance = walletData[0]?.balance || 0;
+    
+    // ดึงยอดถอนที่รอดำเนินการ
+    const [pendingWithdrawData] = await db.execute('SELECT SUM(amount) as pending_amount FROM withdrawals WHERE shop_id = ? AND status = "pending"', [shop_id]);
+    const pending_withdrawal = pendingWithdrawData[0]?.pending_amount || 0;
+    
+    // ดึงยอดเงิน Escrow (ออเดอร์ที่จ่ายแล้ว/กำลังส่ง แต่ยังไม่กดยืนยันรับ)
+    const [pendingEscrowData] = await db.execute('SELECT SUM(total_amount - delivery_fee) as pending_escrow FROM orders WHERE shop_id = ? AND order_status IN ("paid", "shipped", "pending")', [shop_id]);
+    const pending_escrow = pendingEscrowData[0]?.pending_escrow || 0;
+
+    const [orders] = await db.execute('SELECT order_id as id, total_amount as amount, created_at, "sale" as type FROM orders WHERE shop_id = ? AND order_status IN ("completed", "paid") ORDER BY created_at DESC LIMIT 20', [shop_id]);
+    const [withdrawals] = await db.execute('SELECT id, amount, created_at, status, "withdrawal" as type FROM withdrawals WHERE shop_id = ? ORDER BY created_at DESC LIMIT 20', [shop_id]);
+    const history = [...orders, ...withdrawals].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 30);
+    
+    // ส่งกลับไปให้แสดงผล (ใช้ pending_amount รับค่า escrow ไปเพื่อให้ frontend เดิมทำงานได้)
+    res.json({ success: true, balance, pending_amount: pending_escrow, pending_withdrawal, history });
+  } catch (error) {
+    console.error('Wallet API Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/seller/wallet/withdraw', async (req, res) => {
+  const connection = await db.getConnection();
+  try {
+    const { shop_id, amount } = req.body;
+    if (!shop_id || !amount || amount <= 0) return res.status(400).json({ success: false, message: 'ข้อมูลไม่ถูกต้อง' });
+    await connection.beginTransaction();
+    const [wallet] = await connection.execute('SELECT balance FROM shop_wallets WHERE shop_id = ? FOR UPDATE', [shop_id]);
+    const balance = parseFloat(wallet[0]?.balance || 0);
+    if (balance < amount) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'ยอดเงินไม่เพียงพอ' });
+    }
+    await connection.execute('UPDATE shop_wallets SET balance = balance - ? WHERE shop_id = ?', [amount, shop_id]);
+    await connection.execute('INSERT INTO withdrawals (shop_id, amount, status) VALUES (?, ?, "pending")', [shop_id, amount]);
+    await connection.commit();
+    res.json({ success: true, message: 'ส่งคำขอถอนเงินสำเร็จ' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Withdraw API Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+app.get('/api/admin/withdrawals', async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT w.id, w.amount, w.status, w.created_at, s.name as shop_name, s.bank_name, s.bank_account, s.bookbank_image
+      FROM withdrawals w
+      JOIN shops s ON w.shop_id = s.shop_id
+      WHERE w.status = "pending"
+      ORDER BY w.created_at DESC`
+    );
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/admin/withdrawals/:id/approve', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.execute('UPDATE withdrawals SET status = "completed", processed_at = CURRENT_TIMESTAMP WHERE id = ?', [id]);
+    res.json({ success: true, message: 'อนุมัติการถอนเงินสำเร็จ' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/seller/settings/:owner_id', async (req, res) => {
+  try {
+    const owner_id = req.params.owner_id;
+    const [rows] = await db.execute('SELECT s.shop_id, s.name, s.address, s.opening_hours, s.bank_name, s.bank_account, u.full_name AS owner_name FROM shops s JOIN users u ON s.owner_id = u.user_id WHERE s.owner_id = ?', [owner_id]);
+    if (rows.length === 0) return res.json({ success: false, message: 'Shop not found' });
+    res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/seller/settings/:shop_id', async (req, res) => {
+  try {
+    const shop_id = req.params.shop_id;
+    const { name, address, opening_hours, bank_name, bank_account } = req.body;
+    await db.execute('UPDATE shops SET name = ?, address = ?, opening_hours = ?, bank_name = ?, bank_account = ? WHERE shop_id = ?', [name, address, opening_hours, bank_name, bank_account, shop_id]);
+    res.json({ success: true, message: 'บันทึกข้อมูลสำเร็จ' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+const PORT = process.env.PORT || 5000;
+
+// ==========================================
+// ORDER CHAT APIs
+// ==========================================
+app.get('/api/orders/:order_id/messages', async (req, res) => {
+  const orderId = req.params.order_id;
+  try {
+    const [messages] = await db.query(
+      'SELECT * FROM order_messages WHERE order_id = ? ORDER BY created_at ASC',
+      [orderId]
+    );
+    res.json({ success: true, messages });
+  } catch (error) {
+    console.error('Error fetching order messages:', error);
+    res.status(500).json({ success: false, message: 'ไม่สามารถดึงข้อความได้' });
+  }
+});
+
+app.post('/api/orders/:order_id/messages', async (req, res) => {
+  const orderId = req.params.order_id;
+  const { sender_id, sender_type, message } = req.body;
+  
+  if (!sender_id || !sender_type || !message) {
+    return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
+  }
+  
+  try {
+    const [result] = await db.query(
+      'INSERT INTO order_messages (order_id, sender_id, sender_type, message) VALUES (?, ?, ?, ?)',
+      [orderId, sender_id, sender_type, message]
+    );
+    res.json({ success: true, message: 'ส่งข้อความสำเร็จ', message_id: result.insertId });
+  } catch (error) {
+    console.error('Error sending order message:', error);
+    res.status(500).json({ success: false, message: 'ไม่สามารถส่งข้อความได้' });
+  }
+});
+
+
+// ==========================================
+// BANNER APIs
+// ==========================================
+app.get('/api/banners', async (req, res) => {
+  try {
+    const [banners] = await db.query('SELECT * FROM banners WHERE is_active = true ORDER BY id ASC');
+    res.json({ success: true, banners });
+  } catch (error) {
+    console.error('Error fetching banners:', error);
+    res.status(500).json({ success: false, message: 'ไม่สามารถดึงแบนเนอร์ได้' });
+  }
+});
+
+
+// ==========================================
+// ADMIN BANNER APIs
+// ==========================================
+app.get('/api/admin/banners', async (req, res) => {
+  try {
+    const [banners] = await db.query('SELECT * FROM banners ORDER BY created_at DESC');
+    res.json({ success: true, data: banners || [] });
+  } catch (error) {
+    console.error(error);
+    // As requested, return empty array on error instead of 500
+    res.json({ success: false, data: [] });
+  }
+});
+
+app.post('/api/admin/banners', async (req, res) => {
+  const { image_url, link_url, title, subtitle, badge_text, is_active } = req.body;
+  if (!image_url) {
+    return res.status(400).json({ success: false, message: 'image_url is required' });
+  }
+  
+  try {
+    const [result] = await db.query(
+      'INSERT INTO banners (image_url, link_url, title, subtitle, badge_text, is_active) VALUES (?, ?, ?, ?, ?, ?)',
+      [image_url, link_url || null, title || null, subtitle || null, badge_text || null, is_active !== undefined ? is_active : true]
+    );
+    res.json({ success: true, message: 'Banner created', id: result.insertId });
+  } catch (error) {
+    console.error('Error creating banner:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+});
+
+app.put('/api/admin/banners/:id', async (req, res) => {
+  const id = req.params.id;
+  const { image_url, link_url, title, subtitle, badge_text, is_active } = req.body;
+  
+  try {
+    await db.query(
+      'UPDATE banners SET image_url = COALESCE(?, image_url), link_url = ?, title = ?, subtitle = ?, badge_text = ?, is_active = COALESCE(?, is_active) WHERE id = ?',
+      [image_url, link_url, title, subtitle, badge_text, is_active, id]
+    );
+    res.json({ success: true, message: 'Banner updated' });
+  } catch (error) {
+    console.error('Error updating banner:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+});
+
+app.delete('/api/admin/banners/:id', async (req, res) => {
+  const id = req.params.id;
+  try {
+    await db.query('DELETE FROM banners WHERE id = ?', [id]);
+    res.json({ success: true, message: 'Banner deleted' });
+  } catch (error) {
+    console.error('Error deleting banner:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+});
+
+// ==========================================
+// RIDER APIS
+// ==========================================
+
+// 1. Rider Register
+app.post('/api/rider/register', upload.fields([
+    { name: 'id_card_image', maxCount: 1 },
+    { name: 'vehicle_doc_image', maxCount: 1 },
+    { name: 'license_image', maxCount: 1 }
+  ]), async (req, res) => {
+    const { full_name, phone, password, real_name, vehicle_detail, vehicle_plate, license_number } = req.body;
+    if (!full_name || !phone || !vehicle_plate || !password) {
+      return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลที่จำเป็นให้ครบถ้วน' });
+    }
+  
+    const id_card_image = req.files && req.files['id_card_image'] ? '/uploads/' + req.files['id_card_image'][0].filename : '';
+    const vehicle_doc_image = req.files && req.files['vehicle_doc_image'] ? '/uploads/' + req.files['vehicle_doc_image'][0].filename : '';
+    const license_image = req.files && req.files['license_image'] ? '/uploads/' + req.files['license_image'][0].filename : '';
+  
+    try {
+      const [existing] = await db.query('SELECT * FROM users WHERE phone = ?', [phone]);
+      if (existing.length > 0) {
+        return res.status(400).json({ success: false, message: 'เบอร์โทรศัพท์นี้ถูกใช้งานแล้ว' });
+      }
+  
+      const [userResult] = await db.query(
+        'INSERT INTO users (full_name, phone, password, role) VALUES (?, ?, ?, "rider")',
+        [full_name, phone, password]
+      );
+      const userId = userResult.insertId;
+  
+      await db.query(
+        'INSERT INTO riders (user_id, real_name, vehicle_detail, vehicle_plate, id_card_image, vehicle_doc_image, license_number, license_image, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "pending")',
+        [userId, real_name, vehicle_detail, vehicle_plate, id_card_image, vehicle_doc_image, license_number, license_image]
+      );
+  
+      res.json({ success: true, message: 'สมัครสมาชิกสำเร็จ รอการตรวจสอบจากแอดมิน' });
+    } catch (error) {
+      console.error('Rider register error:', error);
+      res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการสมัคร' });
+    }
+  });
+
