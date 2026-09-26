@@ -208,7 +208,7 @@ export default function RiderHomeScreen() {
         <View style={styles.headerActions}>
           <TouchableOpacity 
             style={styles.actionBtn}
-            onPress={() => router.push('/(tabs)/wallet')}
+            onPress={() => router.push('/notifications')}
           >
             <Ionicons name="notifications-outline" size={22} color="#1e293b" />
           </TouchableOpacity>

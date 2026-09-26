@@ -1,12 +1,95 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, Stack } from 'expo-router';
+import { useAuth } from '../context/AuthContext';
+import api from '../utils/api';
+
+const MONTH_NAMES = [
+  'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
+  'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'
+];
 
 export default function IncomeSummaryScreen() {
   const router = useRouter();
+  const { rider } = useAuth();
+  
+  const [loading, setLoading] = useState(true);
+  const [currentMonthIncome, setCurrentMonthIncome] = useState(0);
+  const [prevMonthIncome, setPrevMonthIncome] = useState(0);
+  const [currentMonthJobs, setCurrentMonthJobs] = useState(0);
+  
+  const now = new Date();
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
+  
+  const prevMonth = currentMonth === 0 ? 11 : currentMonth - 1;
+  
+  useEffect(() => {
+    fetchIncomeData();
+  }, [rider]);
+
+  const fetchIncomeData = async () => {
+    try {
+      const riderId = rider?.id || (rider as any)?.rider_id;
+      if (!riderId) {
+        setLoading(false);
+        return;
+      }
+      
+      const response = await api.get(`/rider/${riderId}/history`);
+      if (response.data?.success && response.data?.data?.deliveries) {
+        const deliveries = response.data.data.deliveries;
+        
+        let currIncome = 0;
+        let currJobs = 0;
+        let prevIncome = 0;
+        
+        deliveries.forEach((d: any) => {
+          if (d.status === 'delivered' || d.status === 'completed' || d.completed_at) {
+            const date = new Date(d.completed_at || d.created_at || Date.now());
+            const m = date.getMonth();
+            const y = date.getFullYear();
+            const fee = Number(d.delivery_fee) || 0;
+            
+            if (m === currentMonth && y === currentYear) {
+              currIncome += fee;
+              currJobs++;
+            } else if (m === prevMonth && (y === currentYear || (currentMonth === 0 && y === currentYear - 1))) {
+              prevIncome += fee;
+            }
+          }
+        });
+        
+        setCurrentMonthIncome(currIncome);
+        setCurrentMonthJobs(currJobs);
+        setPrevMonthIncome(prevIncome);
+      }
+    } catch (error) {
+      console.error('Error fetching income:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color="#2e7d32" />
+      </View>
+    );
+  }
+
+  const diff = currentMonthIncome - prevMonthIncome;
+  const percentChange = prevMonthIncome > 0 
+    ? Math.round((diff / prevMonthIncome) * 100) 
+    : (currentMonthIncome > 0 ? 100 : 0);
+    
+  const isPositive = diff >= 0;
+
   return (
     <View style={styles.container}>
+      <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color="#1a1a1a" />
@@ -19,14 +102,17 @@ export default function IncomeSummaryScreen() {
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <Text style={styles.appName}>แอปพลิเคชัน SMART DEAL</Text>
-        <Text style={styles.monthTitle}>กรกฎาคม 2566</Text>
+        <Text style={styles.monthTitle}>{MONTH_NAMES[currentMonth]} {currentYear + 543}</Text>
 
         <View style={styles.totalIncomeCard}>
           <Text style={styles.totalIncomeLabel}>รายได้รวมทั้งหมด</Text>
-          <Text style={styles.totalIncomeValue}>฿24,500.00</Text>
-          <View style={styles.trendBadge}>
-            <Ionicons name="trending-up" size={14} color="#fff" />
-            <Text style={styles.trendText}>+15% จากเดือนที่แล้ว</Text>
+          <Text style={styles.totalIncomeValue}>฿{currentMonthIncome.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</Text>
+          
+          <View style={[styles.trendBadge, !isPositive && { backgroundColor: 'rgba(239, 68, 68, 0.2)' }]}>
+            <Ionicons name={isPositive ? "trending-up" : "trending-down"} size={14} color={isPositive ? "#fff" : "#fca5a5"} />
+            <Text style={[styles.trendText, !isPositive && { color: '#fca5a5' }]}>
+              {isPositive ? '+' : ''}{percentChange}% จากเดือนที่แล้ว
+            </Text>
           </View>
         </View>
 
@@ -38,9 +124,9 @@ export default function IncomeSummaryScreen() {
           </View>
           <View style={styles.detailInfo}>
             <Text style={styles.detailTitle}>ค่าธรรมเนียมการส่ง</Text>
-            <Text style={styles.detailSubtitle}>214 งาน</Text>
+            <Text style={styles.detailSubtitle}>{currentMonthJobs} งาน</Text>
           </View>
-          <Text style={styles.detailAmount}>฿18,200.00</Text>
+          <Text style={styles.detailAmount}>฿{currentMonthIncome.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</Text>
         </View>
 
         <View style={styles.detailCard}>
@@ -51,7 +137,7 @@ export default function IncomeSummaryScreen() {
             <Text style={styles.detailTitle}>ทิปจากลูกค้า</Text>
             <Text style={styles.detailSubtitle}>รวมจากใจลูกค้า</Text>
           </View>
-          <Text style={styles.detailAmount}>฿3,850.00</Text>
+          <Text style={styles.detailAmount}>฿0.00</Text>
         </View>
 
         <View style={styles.detailCard}>
@@ -62,23 +148,30 @@ export default function IncomeSummaryScreen() {
             <Text style={styles.detailTitle}>โบนัสระยะทาง</Text>
             <Text style={styles.detailSubtitle}>มากกว่า 5 กม.</Text>
           </View>
-          <Text style={styles.detailAmount}>฿2,450.00</Text>
+          <Text style={styles.detailAmount}>฿0.00</Text>
         </View>
 
         <View style={styles.chartCard}>
           <Text style={styles.chartTitle}>การเปรียบเทียบรายได้</Text>
-          <Text style={styles.chartValue}>฿24,500.00</Text>
-          <Text style={styles.chartDiff}>มิ.ย. VS ก.ค. <Text style={styles.chartDiffHighlight}>+฿3,200</Text></Text>
+          <Text style={styles.chartValue}>฿{currentMonthIncome.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</Text>
+          <Text style={styles.chartDiff}>
+            {MONTH_NAMES[prevMonth].substring(0, 2)}. VS {MONTH_NAMES[currentMonth].substring(0, 2)}. 
+            <Text style={[styles.chartDiffHighlight, !isPositive && { color: '#ef4444' }]}>
+              {' '}{isPositive ? '+' : '-'}฿{Math.abs(diff).toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+            </Text>
+          </Text>
 
           <View style={styles.chartArea}>
             <View style={styles.barContainer}>
-              <View style={[styles.bar, { height: 80, backgroundColor: '#e0e0e0' }]} />
-              <Text style={styles.barLabel}>มิถุนายน</Text>
+              <View style={[styles.bar, { height: prevMonthIncome > 0 ? (prevMonthIncome / Math.max(prevMonthIncome, currentMonthIncome)) * 120 : 20, backgroundColor: '#e0e0e0' }]} />
+              <Text style={styles.barLabel}>{MONTH_NAMES[prevMonth]}</Text>
             </View>
             <View style={styles.barContainer}>
-              <Text style={styles.barValueTop}>สูงสุด</Text>
-              <View style={[styles.bar, { height: 120, backgroundColor: '#2e7d32' }]} />
-              <Text style={[styles.barLabel, { color: '#2e7d32', fontWeight: 'bold' }]}>กรกฎาคม</Text>
+              {currentMonthIncome >= prevMonthIncome && currentMonthIncome > 0 && (
+                <Text style={styles.barValueTop}>สูงสุด</Text>
+              )}
+              <View style={[styles.bar, { height: currentMonthIncome > 0 ? (currentMonthIncome / Math.max(prevMonthIncome, currentMonthIncome)) * 120 : 20, backgroundColor: '#2e7d32' }]} />
+              <Text style={[styles.barLabel, { color: '#2e7d32', fontWeight: 'bold' }]}>{MONTH_NAMES[currentMonth]}</Text>
             </View>
           </View>
         </View>
@@ -259,6 +352,7 @@ const styles = StyleSheet.create({
     width: 60,
     borderRadius: 12,
     marginBottom: 12,
+    minHeight: 20,
   },
   barLabel: {
     fontSize: 13,
