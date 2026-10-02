@@ -46,11 +46,21 @@ export default function LoginScreen() {
           ]
         );
       } else if (status === 401) {
-        Alert.alert(
-          'เข้าสู่ระบบไม่สำเร็จ', 
-          message, // Could be "รอการอนุมัติ..." or "รหัสผ่านไม่ถูกต้อง"
-          [{ text: 'ตกลง', style: 'default' }]
-        );
+        Alert.alert('เข้าสู่ระบบไม่สำเร็จ', message);
+      } else if (status === 403) {
+        if (data.status === 'rejected') {
+          router.push({
+            pathname: '/register',
+            params: { 
+              isRejected: 'true', 
+              reason: data.reason,
+              riderData: JSON.stringify(data.rider || {}),
+              userData: JSON.stringify(data.user || {})
+            }
+          });
+        } else {
+          Alert.alert('เข้าสู่ระบบไม่สำเร็จ', message);
+        }
       } else if (status === 400 || status === 404) {
         Alert.alert('ข้อมูลไม่ถูกต้อง', message);
       } else {

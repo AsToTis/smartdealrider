@@ -1,11 +1,24 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { useColorScheme, Alert } from 'react-native';
 import { useEffect } from 'react';
 import { AuthProvider, useAuth } from '../context/AuthContext';
-
 SplashScreen.preventAutoHideAsync();
+
+let Notifications: any = null;
+try {
+  Notifications = require('expo-notifications');
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+} catch (e) {
+  console.log('Push notifications not available in Expo Go');
+}
 
 function RootLayoutNav() {
   const colorScheme = useColorScheme();
@@ -16,6 +29,29 @@ function RootLayoutNav() {
   useEffect(() => {
     // Hide splash screen after navigation is ready
     SplashScreen.hideAsync();
+
+    let subscription: any;
+    if (Notifications) {
+      subscription = Notifications.addNotificationResponseReceivedListener((response: any) => {
+        const data = response.notification.request.content.data;
+        if (data?.status === 'rejected') {
+          Alert.alert(
+            'คำขอไม่ผ่านการอนุมัติ',
+            `เหตุผล: ${data.reason}\n\nคุณต้องการแก้ไขข้อมูลและส่งคำขอใหม่หรือไม่?`,
+            [
+              { text: 'แก้ไขข้อมูล', onPress: () => router.push('/register') },
+              { text: 'ตกลง', style: 'cancel' }
+            ]
+          );
+        }
+      });
+    }
+
+    return () => {
+      if (subscription) {
+        subscription.remove();
+      }
+    };
   }, []);
 
   useEffect(() => {

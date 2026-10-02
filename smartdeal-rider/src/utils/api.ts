@@ -2,7 +2,7 @@ import axios from 'axios';
 import Constants from 'expo-constants';
 
 // Fallback IP for development if auto-detection fails, or production URL
-let API_URL = 'http://192.168.1.5:5000/api';
+let API_URL = 'http://172.20.10.2:5000/api';
 
 if (__DEV__) {
   // Use the IP address of the machine running the Expo server

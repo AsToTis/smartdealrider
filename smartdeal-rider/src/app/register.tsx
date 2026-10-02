@@ -1,31 +1,48 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, Alert, SafeAreaView, KeyboardAvoidingView, Platform, Image } from 'react-native';
-import { useRouter } from 'expo-router';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Image } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import { Ionicons, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import api from '../utils/api';
 
 export default function RegisterScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams();
+  
+  const isRejectedParam = params.isRejected === 'true';
+  const rejectReasonParam = params.reason as string || 'ไม่ระบุเหตุผล';
+  const riderData = params.riderData ? JSON.parse(params.riderData as string) : {};
+  const userData = params.userData ? JSON.parse(params.userData as string) : {};
+  
+  const [isRejectedScreen, setIsRejectedScreen] = useState(isRejectedParam);
   
   const [step, setStep] = useState(1);
   const totalSteps = 3;
 
+  const getImageUrl = (path: string) => {
+    if (!path) return null;
+    if (path.startsWith('http')) return path;
+    if (path.startsWith('file://')) return null; // Force re-upload
+    return `${api.defaults.baseURL?.replace('/api', '')}${path}`;
+  };
+
   // Step 1: Account Info
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(userData.email || '');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [phone, setPhone] = useState('');
+  const [phone, setPhone] = useState(userData.phone || '');
 
   // Step 2: Personal Info
-  const [realName, setRealName] = useState('');
-  const [idCardImage, setIdCardImage] = useState<string | null>(null);
+  const [realName, setRealName] = useState(riderData.real_name || '');
+  const [idCardImage, setIdCardImage] = useState<string | null>(getImageUrl(riderData.id_card_image));
 
   // Step 3: Vehicle Info
-  const [vehicleType, setVehicleType] = useState('motorcycle');
-  const [vehiclePlate, setVehiclePlate] = useState('');
-  const [vehicleDocImage, setVehicleDocImage] = useState<string | null>(null);
-  const [licenseImage, setLicenseImage] = useState<string | null>(null);
+  const [vehicleType, setVehicleType] = useState(riderData.vehicle_type || 'motorcycle');
+  const [vehiclePlate, setVehiclePlate] = useState(riderData.vehicle_plate || '');
+  const [licenseNumber, setLicenseNumber] = useState(riderData.license_number || '');
+  const [vehicleDocImage, setVehicleDocImage] = useState<string | null>(getImageUrl(riderData.vehicle_doc_image));
+  const [licenseImage, setLicenseImage] = useState<string | null>(getImageUrl(riderData.license_image));
   const [termsAccepted, setTermsAccepted] = useState(false);
   
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -62,6 +79,7 @@ export default function RegisterScreen() {
 
   const handleSubmit = async () => {
     if (!vehiclePlate.trim()) return Alert.alert('ข้อผิดพลาด', 'กรุณากรอกป้ายทะเบียนรถ');
+    if (!licenseNumber.trim()) return Alert.alert('ข้อผิดพลาด', 'กรุณากรอกเลขที่ใบอนุญาตขับขี่');
     if (!vehicleDocImage) return Alert.alert('ข้อผิดพลาด', 'กรุณาถ่ายรูปหรืออัปโหลดรูปป้ายวงกลม/เล่มทะเบียนรถ');
     if (!licenseImage) return Alert.alert('ข้อผิดพลาด', 'กรุณาถ่ายรูปหรืออัปโหลดรูปใบอนุญาตขับขี่');
     if (!termsAccepted) return Alert.alert('ข้อผิดพลาด', 'กรุณายอมรับเงื่อนไขและการตรวจสอบประวัติ');
@@ -77,35 +95,58 @@ export default function RegisterScreen() {
       formData.append('real_name', realName);
       formData.append('vehicle_type', vehicleType);
       formData.append('vehicle_plate', vehiclePlate);
+      formData.append('license_number', licenseNumber);
 
-      if (idCardImage) {
+      if (idCardImage && !idCardImage.startsWith('http')) {
+        const filename = idCardImage.split('/').pop() || 'idcard.jpg';
+        const match = /\.(\w+)$/.exec(filename);
+        const ext = match ? match[1].toLowerCase() : 'jpg';
         formData.append('id_card_image', {
           uri: idCardImage,
-          name: 'idcard.jpg',
-          type: 'image/jpeg',
+          name: filename,
+          type: ext === 'jpg' ? 'image/jpeg' : `image/${ext}`
         } as any);
       }
       
-      if (licenseImage) {
+      if (licenseImage && !licenseImage.startsWith('http')) {
+        const filename = licenseImage.split('/').pop() || 'license.jpg';
+        const match = /\.(\w+)$/.exec(filename);
+        const ext = match ? match[1].toLowerCase() : 'jpg';
         formData.append('license_image', {
           uri: licenseImage,
-          name: 'license.jpg',
-          type: 'image/jpeg',
+          name: filename,
+          type: ext === 'jpg' ? 'image/jpeg' : `image/${ext}`
         } as any);
       }
       
-      if (vehicleDocImage) {
+      if (vehicleDocImage && !vehicleDocImage.startsWith('http')) {
+        const filename = vehicleDocImage.split('/').pop() || 'vehicledoc.jpg';
+        const match = /\.(\w+)$/.exec(filename);
+        const ext = match ? match[1].toLowerCase() : 'jpg';
         formData.append('vehicle_doc_image', {
           uri: vehicleDocImage,
-          name: 'vehicle_doc.jpg',
-          type: 'image/jpeg',
+          name: filename,
+          type: ext === 'jpg' ? 'image/jpeg' : `image/${ext}`
         } as any);
       }
 
-      const response = await api.post('/rider/register', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
+      const responseData = await new Promise<any>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${api.defaults.baseURL}/rider/register`);
+        xhr.onload = () => {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(data);
+            } else {
+              reject(new Error(data.message || data.error || 'เซิร์ฟเวอร์แจ้งข้อผิดพลาด'));
+            }
+          } catch (e) {
+            reject(new Error('เซิร์ฟเวอร์ส่งข้อมูลกลับมาผิดพลาด (อาจเป็น 500 HTML Error)'));
+          }
+        };
+        xhr.onerror = () => reject(new Error('เกิดข้อผิดพลาดในการเชื่อมต่อเครือข่าย'));
+        xhr.send(formData);
       });
 
       Alert.alert(
@@ -116,8 +157,13 @@ export default function RegisterScreen() {
         ]
       );
     } catch (error: any) {
-      console.error('Registration error:', error);
-      Alert.alert('เกิดข้อผิดพลาด', error.response?.data?.message || 'ไม่สามารถสมัครสมาชิกได้ กรุณาลองใหม่อีกครั้ง');
+      // Check if it's a duplicate email/phone error
+      const errorMsg = error.message || 'ไม่สามารถสมัครสมาชิกได้';
+      if (errorMsg.includes('อีเมลหรือเบอร์โทรศัพท์นี้ถูกใช้งานแล้ว')) {
+        Alert.alert('ข้อมูลซ้ำ', 'อีเมลหรือเบอร์โทรศัพท์นี้ถูกใช้งานแล้ว กรุณาเข้าสู่ระบบ หรือใช้ข้อมูลอื่น');
+      } else {
+        Alert.alert('เกิดข้อผิดพลาด', errorMsg);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -268,6 +314,15 @@ export default function RegisterScreen() {
         placeholderTextColor="#999"
       />
 
+      <Text style={styles.label}>เลขที่ใบอนุญาตขับขี่</Text>
+      <TextInput
+        style={styles.input}
+        placeholder="เช่น 12345678"
+        value={licenseNumber}
+        onChangeText={setLicenseNumber}
+        placeholderTextColor="#999"
+      />
+
       <Text style={styles.label}>รูปป้ายวงกลม / เล่มทะเบียนรถ</Text>
       <TouchableOpacity style={styles.uploadArea} onPress={() => pickImage(setVehicleDocImage)}>
         {vehicleDocImage ? (
@@ -329,6 +384,31 @@ export default function RegisterScreen() {
       </View>
     </View>
   );
+
+  if (isRejectedScreen) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#f8fafc' }}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+          <MaterialIcons name="error-outline" size={80} color="#ef4444" />
+          <Text style={{ fontSize: 20, fontWeight: 'bold', marginTop: 20, color: '#0f172a', textAlign: 'center' }}>
+            คำขอสมัครไรเดอร์ไม่ผ่านการอนุมัติ
+          </Text>
+          <Text style={{ textAlign: 'center', color: '#ef4444', marginTop: 10, lineHeight: 22, fontWeight: '600' }}>
+            เหตุผล: {rejectReasonParam}
+          </Text>
+          <Text style={{ textAlign: 'center', color: '#64748b', marginTop: 10, lineHeight: 22 }}>
+            กรุณาแก้ไขข้อมูลและแนบเอกสารให้ถูกต้อง แล้วส่งคำขอเข้ามาใหม่อีกครั้ง
+          </Text>
+          <TouchableOpacity 
+            style={{ backgroundColor: '#16a34a', paddingVertical: 16, borderRadius: 14, width: '100%', marginTop: 30, alignItems: 'center' }} 
+            onPress={() => setIsRejectedScreen(false)}
+          >
+            <Text style={{ color: '#fff', fontSize: 16, fontWeight: 'bold' }}>แก้ไขข้อมูลและส่งใหม่</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
