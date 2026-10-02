@@ -13,7 +13,7 @@ if (__DEV__) {
   }
 } else {
   // Add your production URL here when deploying
-  // API_URL = 'https://api.yourdomain.com/api';
+  API_URL = 'http://202.28.34.205:5000/api';
 }
 
 const api = axios.create({
