@@ -69,7 +69,7 @@ export default function OrderChatScreen() {
     if (!orderId) return;
     try {
       if (showLoading) setLoading(true);
-      const res = await api.get(`/orders/${orderId}/messages?target=${activeChannel}`);
+      const res = await api.get(`/orders/${orderId}/messages?role=rider&target=${activeChannel}`);
       if (res.data?.success && Array.isArray(res.data.messages)) {
         setMessages(res.data.messages);
       }
@@ -177,9 +177,21 @@ export default function OrderChatScreen() {
         ? '🏪 ร้านค้า' 
         : '👤 ลูกค้า';
 
-    const timeStr = item.created_at
-      ? new Date(item.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })
-      : '';
+    const formatTime = (dateStr: string | undefined) => {
+      if (!dateStr) return '';
+      try {
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) {
+          const parts = dateStr.split(/[- :T]/);
+          if (parts.length >= 5) return `${parts[3]}:${parts[4]}`;
+          return '';
+        }
+        return d.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+      } catch (e) {
+        return '';
+      }
+    };
+    const timeStr = formatTime(item.created_at);
 
     const imageUrl = item.image_url 
       ? (item.image_url.startsWith('http') || item.image_url.startsWith('data:') 
