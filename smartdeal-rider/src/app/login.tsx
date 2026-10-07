@@ -37,7 +37,8 @@ export default function LoginScreen() {
       console.error(error);
       
       const status = error.response?.status;
-      const message = error.response?.data?.message || 'ไม่สามารถเข้าสู่ระบบได้ กรุณาลองใหม่อีกครั้ง';
+      const data = error.response?.data || {};
+      const message = data.message || 'ไม่สามารถเข้าสู่ระบบได้ กรุณาลองใหม่อีกครั้ง';
       
       if (status === 403) {
         Alert.alert(

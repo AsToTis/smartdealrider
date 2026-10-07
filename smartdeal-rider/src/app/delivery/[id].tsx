@@ -25,6 +25,7 @@ type Job = {
   order_id: number;
   delivery_fee: number | string;
   delivery_status?: DeliveryStatus;
+  order_status?: string;
   shop_name: string;
   shop_address: string;
   shop_phone?: string;
@@ -65,9 +66,10 @@ export default function DeliveryRoute() {
   const orderId = Number(id);
   const riderId = rider?.id || (rider as any)?.rider_id || 1;
 
-  const fetchJob = async () => {
+  const fetchJob = async (showLoading = false) => {
     if (!Number.isInteger(orderId)) { setLoading(false); return; }
     try {
+      if (showLoading) setLoading(true);
       const response = await api.get(`/rider/jobs/${orderId}`);
       if (!response.data?.success) throw new Error(response.data?.message || 'ไม่พบข้อมูลงาน');
       const data = response.data.data as Job;
@@ -83,14 +85,21 @@ export default function DeliveryRoute() {
       setJob(data);
       if (data.delivery_status) setStatus(data.delivery_status);
     } catch (error: any) {
-      Alert.alert('โหลดงานไม่สำเร็จ', error.response?.data?.message || 'กรุณาลองใหม่อีกครั้ง');
+      if (showLoading) {
+        Alert.alert('โหลดงานไม่สำเร็จ', error.response?.data?.message || 'กรุณาลองใหม่อีกครั้ง');
+      }
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchJob();
+    fetchJob(true);
+    // อัปเดตสถานะอัตโนมัติทุกๆ 3 วินาที เพื่อรับรู้ทันทีที่ร้านกดยืนยันพร้อมส่ง
+    const interval = setInterval(() => {
+      fetchJob(false);
+    }, 3000);
+    return () => clearInterval(interval);
   }, [id]);
 
   // Coords & Map Calculations
@@ -178,8 +187,22 @@ export default function DeliveryRoute() {
     }
   };
 
-  // Open photo modal for pickup or dropoff
+  // Check if shop is ready with the food/items
+  const isShopReady = job?.order_status === 'ready' || job?.order_status === 'delivering' || job?.order_status === 'delivered';
+
+  // Open photo modal for pickup or dropoff (Strict Step 1 -> Step 2)
   const openProofModal = (type: 'pickup' | 'dropoff') => {
+    if (type === 'pickup' && !isShopReady) {
+      Alert.alert(
+        'ร้านค้ายังเตรียมสินค้าไม่เสร็จ',
+        'ร้านค้ายังไม่ได้กดยืนยันว่าอาหาร/สินค้าพร้อมส่ง กรุณารอทางร้านกดยืนยันในระบบ หรือติดต่อสอบถามทางแชทร้านค้าครับ',
+        [
+          { text: 'แชทกับร้านค้า', onPress: () => openChatWith('seller') },
+          { text: 'เข้าใจแล้ว', style: 'cancel' }
+        ]
+      );
+      return;
+    }
     setPhotoType(type);
     setCapturedPhoto(null);
     setPhotoModalVisible(true);
@@ -349,7 +372,10 @@ export default function DeliveryRoute() {
         </View>
         <TouchableOpacity 
           style={styles.headerChatBtn} 
-          onPress={() => router.push(`/chat/${job.order_id}` as any)}
+          onPress={() => {
+          const activeTarget = (status === 'accepted' || status === 'arriving_shop') ? 'seller' : 'buyer';
+          router.push(`/chat/${job.order_id}?target=${activeTarget}` as any);
+        }}
         >
           <Ionicons name="chatbubbles" size={20} color="#059669" />
         </TouchableOpacity>
@@ -489,6 +515,20 @@ export default function DeliveryRoute() {
           <Text style={styles.cardPrimaryText}>{job.shop_name}</Text>
           <Text style={styles.cardSubText}>{job.shop_address}</Text>
 
+          {/* Shop Preparation Status Alert Banner */}
+          {!isShopReady && (status === 'accepted' || status === 'arriving_shop') && (
+            <View style={styles.shopStatusAlert}>
+              <MaterialCommunityIcons name="clock-outline" size={16} color="#d97706" />
+              <Text style={styles.shopStatusAlertText}>ร้านค้ากำลังจัดเตรียมสินค้า (ยังไม่พร้อมส่ง)</Text>
+            </View>
+          )}
+          {isShopReady && (status === 'accepted' || status === 'arriving_shop') && (
+            <View style={[styles.shopStatusAlert, { backgroundColor: '#ecfdf5', borderColor: '#a7f3d0' }]}>
+              <MaterialCommunityIcons name="check-circle" size={16} color="#059669" />
+              <Text style={[styles.shopStatusAlertText, { color: '#059669' }]}>ร้านค้ากดยืนยันพร้อมส่งแล้ว ✅</Text>
+            </View>
+          )}
+
           {/* Action Row: Chat with Shop & Call Shop */}
           <View style={styles.contactRow}>
             <TouchableOpacity 
@@ -568,13 +608,32 @@ export default function DeliveryRoute() {
             )}
           </TouchableOpacity>
         ) : status === 'arriving_shop' ? (
-          <TouchableOpacity
-            style={[styles.primaryActionBtn, { backgroundColor: '#0284c7' }]}
-            onPress={() => openProofModal('pickup')}
-          >
-            <MaterialCommunityIcons name="camera" size={20} color="#fff" style={{ marginRight: 6 }} />
-            <Text style={styles.primaryActionBtnText}>ถ่ายรูปยืนยันรับสินค้า</Text>
-          </TouchableOpacity>
+          isShopReady ? (
+            <TouchableOpacity
+              style={[styles.primaryActionBtn, { backgroundColor: '#0284c7' }]}
+              onPress={() => openProofModal('pickup')}
+            >
+              <MaterialCommunityIcons name="camera" size={20} color="#fff" style={{ marginRight: 6 }} />
+              <Text style={styles.primaryActionBtnText}>ถ่ายรูปยืนยันรับสินค้า</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={[styles.primaryActionBtn, { backgroundColor: '#94a3b8' }]}
+              onPress={() => {
+                Alert.alert(
+                  'ร้านค้ายังเตรียมสินค้าไม่เสร็จ',
+                  'กรุณารอทางร้านกดยืนยัน "พร้อมส่งสินค้า" ในระบบก่อน คุณจึงจะสามารถกดยืนยันรับสินค้าได้ครับ\n\n(คุณสามารถกดแชทถามร้านค้าได้)',
+                  [
+                    { text: 'แชทถามร้านค้า', onPress: () => openChatWith('seller') },
+                    { text: 'ตกลง', style: 'cancel' }
+                  ]
+                );
+              }}
+            >
+              <MaterialCommunityIcons name="clock-outline" size={20} color="#fff" style={{ marginRight: 6 }} />
+              <Text style={styles.primaryActionBtnText}>⏳ รอร้านค้ากดพร้อมส่ง</Text>
+            </TouchableOpacity>
+          )
         ) : status === 'delivering' ? (
           <TouchableOpacity
             style={[styles.primaryActionBtn, { backgroundColor: '#059669' }]}
@@ -692,6 +751,23 @@ export default function DeliveryRoute() {
 }
 
 const styles = StyleSheet.create({
+  shopStatusAlert: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fffbeb',
+    borderWidth: 1,
+    borderColor: '#fde68a',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginTop: 8,
+    gap: 6,
+  },
+  shopStatusAlertText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#b45309',
+  },
   container: {
     flex: 1,
     backgroundColor: '#f8fafc'

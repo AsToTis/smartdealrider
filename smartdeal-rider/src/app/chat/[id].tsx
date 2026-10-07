@@ -247,7 +247,7 @@ export default function OrderChatScreen() {
       <View style={styles.tabContainer}>
         <TouchableOpacity 
           style={[styles.tabBtn, activeChannel === 'seller' && styles.tabBtnActiveSeller]} 
-          onPress={() => setActiveChannel('seller')}
+          onPress={() => { setActiveChannel('seller'); setMessages([]); }}
         >
           <MaterialCommunityIcons 
             name="storefront" 
@@ -262,7 +262,7 @@ export default function OrderChatScreen() {
 
         <TouchableOpacity 
           style={[styles.tabBtn, activeChannel === 'buyer' && styles.tabBtnActiveBuyer]} 
-          onPress={() => setActiveChannel('buyer')}
+          onPress={() => { setActiveChannel('buyer'); setMessages([]); }}
         >
           <MaterialCommunityIcons 
             name="account" 
