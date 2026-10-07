@@ -30,13 +30,21 @@ interface ChatMessage {
   created_at: string;
 }
 
-const quickReplies = [
-  'กำลังเดินทางไปครับ 🛵',
+const quickRepliesSeller = [
+  'กำลังเดินทางไปที่ร้านครับ 🛵',
   'ถึงหน้าร้านแล้วครับ 🏪',
-  'รับอาหารแล้ว กำลังไปส่งครับ 🍱',
+  'อาหารใกล้เสร็จหรือยังครับ? ⏳',
+  'รับสินค้าเรียบร้อยแล้วครับ 🍱',
+  'ขอบคุณครับ 🙏',
+];
+
+const quickRepliesBuyer = [
+  'กำลังเดินทางไปส่งสินค้าครับ 🛵',
+  'อาหารรับจากร้านแล้ว กำลังไปส่งครับ 🍱',
   'ถึงจุดส่งสินค้าแล้วครับ 📍',
-  'วางสินค้าไว้เรียบร้อยแล้วครับ 📦',
-  'รบกวนรับโทรศัพท์ด้วยครับ 📞',
+  'วางสินค้าไว้หน้าบ้านเรียบร้อยครับ 📦',
+  'รบกวนรับโทรศัพท์สักครู่นะครับ 📞',
+  'ขอบคุณที่ใช้บริการครับ 🙏',
 ];
 
 export default function OrderChatScreen() {
@@ -46,8 +54,9 @@ export default function OrderChatScreen() {
   const orderId = Number(id);
   const riderId = rider?.id || (rider as any)?.rider_id || 1;
 
-  const [activeTab, setActiveTab] = useState<'all' | 'seller' | 'buyer'>(
-    target === 'seller' ? 'seller' : target === 'buyer' ? 'buyer' : 'all'
+  // 2 Distinct Channels: 'seller' (ร้านค้า) and 'buyer' (ลูกค้า)
+  const [activeChannel, setActiveChannel] = useState<'seller' | 'buyer'>(
+    target === 'seller' ? 'seller' : 'buyer'
   );
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
@@ -60,7 +69,7 @@ export default function OrderChatScreen() {
     if (!orderId) return;
     try {
       if (showLoading) setLoading(true);
-      const res = await api.get(`/orders/${orderId}/messages`);
+      const res = await api.get(`/orders/${orderId}/messages?target=${activeChannel}`);
       if (res.data?.success && Array.isArray(res.data.messages)) {
         setMessages(res.data.messages);
       }
@@ -69,7 +78,7 @@ export default function OrderChatScreen() {
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, [orderId]);
+  }, [orderId, activeChannel]);
 
   useEffect(() => {
     fetchMessages(true);
@@ -129,11 +138,10 @@ export default function OrderChatScreen() {
 
     try {
       setSending(true);
-      const receiverType = activeTab === 'all' ? 'all' : activeTab;
       const payload = {
         sender_id: riderId,
         sender_type: 'rider',
-        receiver_type: receiverType,
+        receiver_type: activeChannel, // Strictly 'seller' or 'buyer'
         message: textToSend,
         image_url: selectedImage || null,
       };
@@ -156,37 +164,28 @@ export default function OrderChatScreen() {
     }
   };
 
-  const filteredMessages = messages.filter(m => {
-    if (activeTab === 'all') return true;
-    if (m.sender_type === 'rider') {
-      return m.receiver_type === activeTab || m.receiver_type === 'all' || !m.receiver_type;
-    }
-    return m.sender_type === activeTab;
-  });
+  const currentQuickReplies = activeChannel === 'seller' ? quickRepliesSeller : quickRepliesBuyer;
 
   const renderMessageItem = ({ item }: { item: ChatMessage }) => {
     const isMe = item.sender_type === 'rider';
-    const isSystem = item.sender_type === 'system';
     const isSeller = item.sender_type === 'seller';
     const isBuyer = item.sender_type === 'buyer';
 
-    if (isSystem) {
-      return (
-        <View style={styles.systemMsgWrap}>
-          <View style={styles.systemBadge}>
-            <Text style={styles.systemText}>{item.message}</Text>
-          </View>
-          {item.image_url && (
-            <Image source={{ uri: item.image_url }} style={styles.chatImageSystem} />
-          )}
-        </View>
-      );
-    }
+    const roleTag = isMe 
+      ? '🛵 ไรเดอร์ (คุณ)' 
+      : isSeller 
+        ? '🏪 ร้านค้า' 
+        : '👤 ลูกค้า';
 
-    const roleTag = isSeller ? '🏪 ร้านค้า' : isBuyer ? '👤 ลูกค้า' : '🛵 ไรเดอร์ (คุณ)';
     const timeStr = item.created_at
       ? new Date(item.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })
       : '';
+
+    const imageUrl = item.image_url 
+      ? (item.image_url.startsWith('http') || item.image_url.startsWith('data:') 
+          ? item.image_url 
+          : `https://smartdeal-backend-vhjo.onrender.com${item.image_url}`)
+      : null;
 
     return (
       <View style={[styles.msgRow, isMe ? styles.msgRowRight : styles.msgRowLeft]}>
@@ -201,24 +200,21 @@ export default function OrderChatScreen() {
         )}
 
         <View style={[styles.bubbleContainer, isMe ? styles.bubbleRight : styles.bubbleLeft]}>
-          {/* Header role & time */}
           <View style={styles.bubbleMeta}>
             <Text style={[styles.roleTagText, isMe ? styles.roleTagMe : isSeller ? styles.roleTagSeller : styles.roleTagBuyer]}>
               {roleTag}
             </Text>
-            <Text style={styles.msgTime}>{timeStr}</Text>
+            <Text style={[styles.msgTime, isMe && { color: '#bbf7d0' }]}>{timeStr}</Text>
           </View>
 
-          {/* Photo if present */}
-          {item.image_url && (
+          {imageUrl && (
             <Image 
-              source={{ uri: item.image_url }} 
+              source={{ uri: imageUrl }} 
               style={styles.chatImage} 
               resizeMode="cover"
             />
           )}
 
-          {/* Text Message */}
           {!!item.message && (
             <Text style={[styles.msgText, isMe ? styles.msgTextMe : styles.msgTextOther]}>
               {item.message}
@@ -237,9 +233,9 @@ export default function OrderChatScreen() {
           <Ionicons name="arrow-back" size={22} color="#0f172a" />
         </TouchableOpacity>
         <View style={styles.headerTitleBox}>
-          <Text style={styles.headerTitle}>แชทประจำออเดอร์ #{orderId}</Text>
+          <Text style={styles.headerTitle}>แชทออเดอร์ #{orderId}</Text>
           <Text style={styles.headerSubtitle}>
-            {activeTab === 'seller' ? 'สนทนากับ ร้านค้า 🏪' : activeTab === 'buyer' ? 'สนทนากับ ลูกค้า 👤' : 'ข้อความทั้งหมด (รวมร้านค้า & ลูกค้า)'}
+            {activeChannel === 'seller' ? 'ห้องสนทนากับ ร้านค้า 🏪' : 'ห้องสนทนากับ ลูกค้า 👤'}
           </Text>
         </View>
         <TouchableOpacity style={styles.refreshBtn} onPress={() => fetchMessages(true)}>
@@ -247,27 +243,36 @@ export default function OrderChatScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Segmented Filter Tabs */}
+      {/* 2-Channel Strict Segregated Tabs */}
       <View style={styles.tabContainer}>
         <TouchableOpacity 
-          style={[styles.tabBtn, activeTab === 'all' && styles.tabBtnActive]} 
-          onPress={() => setActiveTab('all')}
+          style={[styles.tabBtn, activeChannel === 'seller' && styles.tabBtnActiveSeller]} 
+          onPress={() => setActiveChannel('seller')}
         >
-          <Text style={[styles.tabText, activeTab === 'all' && styles.tabTextActive]}>ทั้งหมด</Text>
+          <MaterialCommunityIcons 
+            name="storefront" 
+            size={16} 
+            color={activeChannel === 'seller' ? '#0284c7' : '#64748b'} 
+            style={{ marginRight: 6 }} 
+          />
+          <Text style={[styles.tabText, activeChannel === 'seller' && styles.tabTextActiveSeller]}>
+            แชทกับร้านค้า
+          </Text>
         </TouchableOpacity>
+
         <TouchableOpacity 
-          style={[styles.tabBtn, activeTab === 'seller' && styles.tabBtnActiveSeller]} 
-          onPress={() => setActiveTab('seller')}
+          style={[styles.tabBtn, activeChannel === 'buyer' && styles.tabBtnActiveBuyer]} 
+          onPress={() => setActiveChannel('buyer')}
         >
-          <MaterialCommunityIcons name="storefront-outline" size={14} color={activeTab === 'seller' ? '#0284c7' : '#64748b'} style={{ marginRight: 4 }} />
-          <Text style={[styles.tabText, activeTab === 'seller' && styles.tabTextActiveSeller]}>ร้านค้า</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.tabBtn, activeTab === 'buyer' && styles.tabBtnActiveBuyer]} 
-          onPress={() => setActiveTab('buyer')}
-        >
-          <MaterialCommunityIcons name="account-outline" size={14} color={activeTab === 'buyer' ? '#059669' : '#64748b'} style={{ marginRight: 4 }} />
-          <Text style={[styles.tabText, activeTab === 'buyer' && styles.tabTextActiveBuyer]}>ลูกค้า</Text>
+          <MaterialCommunityIcons 
+            name="account" 
+            size={16} 
+            color={activeChannel === 'buyer' ? '#059669' : '#64748b'} 
+            style={{ marginRight: 6 }} 
+          />
+          <Text style={[styles.tabText, activeChannel === 'buyer' && styles.tabTextActiveBuyer]}>
+            แชทกับลูกค้า
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -280,22 +285,30 @@ export default function OrderChatScreen() {
         {loading ? (
           <View style={styles.centerBox}>
             <ActivityIndicator size="large" color="#059669" />
-            <Text style={styles.loadingText}>กำลังโหลดข้อความแชท...</Text>
+            <Text style={styles.loadingText}>กำลังโหลดข้อความ...</Text>
           </View>
-        ) : filteredMessages.length === 0 ? (
+        ) : messages.length === 0 ? (
           <View style={styles.emptyBox}>
             <View style={styles.emptyIconBg}>
-              <MaterialCommunityIcons name="chat-processing-outline" size={48} color="#94a3b8" />
+              <MaterialCommunityIcons 
+                name={activeChannel === 'seller' ? 'storefront-outline' : 'account-outline'} 
+                size={48} 
+                color="#94a3b8" 
+              />
             </View>
-            <Text style={styles.emptyTitle}>ยังไม่มีข้อความสนทนา</Text>
+            <Text style={styles.emptyTitle}>
+              {activeChannel === 'seller' ? 'ยังไม่มีข้อความกับร้านค้า' : 'ยังไม่มีข้อความกับลูกค้า'}
+            </Text>
             <Text style={styles.emptySub}>
-              คุณสามารถส่งข้อความสอบถามทางร้าน หรือแจ้งความคืบหน้าให้ลูกค้าทราบได้ที่นี่
+              {activeChannel === 'seller' 
+                ? 'สอบถามสถานะอาหาร หรือส่งรูปภาพให้ทางร้านค้าได้ที่นี่' 
+                : 'แจ้งสถานะการส่ง หรือส่งรูปภาพให้ลูกค้าได้ที่นี่'}
             </Text>
           </View>
         ) : (
           <FlatList
             ref={flatListRef}
-            data={filteredMessages}
+            data={messages}
             keyExtractor={(item) => String(item.id || Math.random())}
             renderItem={renderMessageItem}
             contentContainerStyle={styles.messagesList}
@@ -308,7 +321,7 @@ export default function OrderChatScreen() {
           <FlatList
             horizontal
             showsHorizontalScrollIndicator={false}
-            data={quickReplies}
+            data={currentQuickReplies}
             keyExtractor={(item, index) => String(index)}
             renderItem={({ item }) => (
               <TouchableOpacity
@@ -344,7 +357,7 @@ export default function OrderChatScreen() {
 
           <TextInput
             style={styles.textInput}
-            placeholder={`พิมพ์ข้อความถึง${activeTab === 'seller' ? 'ร้านค้า' : activeTab === 'buyer' ? 'ลูกค้า' : 'ทุกคน'}...`}
+            placeholder={activeChannel === 'seller' ? 'พิมพ์ข้อความถึงร้านค้า...' : 'พิมพ์ข้อความถึงลูกค้า...'}
             placeholderTextColor="#94a3b8"
             value={inputText}
             onChangeText={setInputText}
@@ -355,7 +368,8 @@ export default function OrderChatScreen() {
             disabled={sending || (!inputText.trim() && !selectedImage)}
             style={[
               styles.sendBtn,
-              (sending || (!inputText.trim() && !selectedImage)) && styles.sendBtnDisabled
+              (sending || (!inputText.trim() && !selectedImage)) && styles.sendBtnDisabled,
+              activeChannel === 'seller' && { backgroundColor: '#0284c7' }
             ]}
             onPress={() => handleSend()}
           >
@@ -408,7 +422,7 @@ const styles = StyleSheet.create({
   headerSubtitle: {
     fontSize: 11,
     color: '#64748b',
-    fontWeight: '600',
+    fontWeight: '700',
     marginTop: 1,
   },
   refreshBtn: {
@@ -425,43 +439,44 @@ const styles = StyleSheet.create({
     padding: 4,
     marginHorizontal: 16,
     marginVertical: 8,
-    borderRadius: 12,
+    borderRadius: 14,
   },
   tabBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 7,
-    borderRadius: 9,
-  },
-  tabBtnActive: {
-    backgroundColor: '#ffffff',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 2,
+    paddingVertical: 10,
+    borderRadius: 11,
   },
   tabBtnActiveSeller: {
-    backgroundColor: '#e0f2fe',
+    backgroundColor: '#ffffff',
+    shadowColor: '#0284c7',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
   },
   tabBtnActiveBuyer: {
-    backgroundColor: '#ecfdf5',
+    backgroundColor: '#ffffff',
+    shadowColor: '#059669',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
   },
   tabText: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
     color: '#64748b',
   },
-  tabTextActive: {
-    color: '#0f172a',
-  },
   tabTextActiveSeller: {
     color: '#0284c7',
+    fontWeight: '800',
   },
   tabTextActiveBuyer: {
     color: '#059669',
+    fontWeight: '800',
   },
   centerBox: {
     flex: 1,
@@ -574,7 +589,7 @@ const styles = StyleSheet.create({
   },
   msgTime: {
     fontSize: 10,
-    color: '#cbd5e1',
+    color: '#94a3b8',
   },
   msgText: {
     fontSize: 14,
@@ -589,34 +604,11 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   chatImage: {
-    width: 200,
-    height: 150,
+    width: 220,
+    height: 160,
     borderRadius: 12,
-    marginVertical: 4,
-  },
-  systemMsgWrap: {
-    alignItems: 'center',
-    marginVertical: 8,
-  },
-  systemBadge: {
-    backgroundColor: '#fef3c7',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#fde68a',
-  },
-  systemText: {
-    fontSize: 12,
-    color: '#92400e',
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  chatImageSystem: {
-    width: 160,
-    height: 110,
-    borderRadius: 10,
-    marginTop: 6,
+    marginVertical: 6,
+    backgroundColor: '#e2e8f0',
   },
   quickReplyContainer: {
     backgroundColor: '#ffffff',
