@@ -259,7 +259,7 @@ export default function DeliveryRoute() {
         if (res.data?.success) {
           setStatus('delivered');
           setPhotoModalVisible(false);
-          Alert.alert('จัดส่งสำเร็จแล้ว 🎉', 'ระบบบันทึกหลักฐานและโอนเงินค่ารอบเข้ากระเป๋าเงินของคุณเรียบร้อยแล้ว', [
+          Alert.alert('ส่งมอบสินค้าเรียบร้อย 📦', 'ระบบได้บันทึกรูปหลักฐานและส่งแจ้งเตือนให้ลูกค้าตรวจสอบแล้ว\n\n💰 เงินค่ารอบจะถูกโอนเข้ากระเป๋าของคุณทันทีที่ลูกค้ายืนยันการรับสินค้าในระบบครับ', [
             { text: 'กลับหน้ารวมงาน', onPress: () => router.replace('/(tabs)') }
           ]);
         } else {
