@@ -56,7 +56,18 @@ export default function MyDeliveriesScreen() {
       
       const response = await api.get(`/rider/${riderId}/history`);
       if (response.data?.success && response.data?.data) {
-        const all: DeliveryOrder[] = response.data.data.deliveries || [];
+        const rawList: DeliveryOrder[] = response.data.data.deliveries || [];
+        const baseFare = 35;
+        const perKm = 8;
+        const all: DeliveryOrder[] = rawList.map((d: any) => {
+          const distNum = parseFloat(d.distance) || 2.5;
+          const calculatedFare = Math.round(baseFare + (distNum * perKm));
+          const feeNum = parseFloat(d.delivery_fee) || 0;
+          return {
+            ...d,
+            delivery_fee: feeNum > 0 ? feeNum : calculatedFare,
+          };
+        });
         
         const active = all.filter(d => 
           d.status && d.status !== 'delivered' && d.status !== 'completed' && d.status !== 'cancelled'

@@ -46,11 +46,24 @@ export default function HistoryScreen() {
       const response = await api.get(`/rider/${riderId}/history`);
       if (response.data?.success) {
         const data = response.data.data || {};
-        const deliveries: HistoryItem[] = data.deliveries || [];
+        const baseFare = 35;
+        const perKm = 8;
+        const deliveries: HistoryItem[] = (data.deliveries || []).map((d: any) => {
+          const distNum = parseFloat(d.distance) || 2.5;
+          const calculatedFare = Math.round(baseFare + (distNum * perKm));
+          const feeNum = parseFloat(d.delivery_fee) || 0;
+          return {
+            ...d,
+            delivery_fee: feeNum > 0 ? feeNum : calculatedFare,
+          };
+        });
+        const totalEarned = deliveries
+          .filter((d: any) => d.status === 'delivered' || d.status === 'completed')
+          .reduce((sum, d) => sum + Number(d.delivery_fee || 0), 0);
         setHistory(deliveries);
         setSummary({
           total_jobs: deliveries.length,
-          total_earnings: Number(data.total_earnings) || 0,
+          total_earnings: totalEarned > 0 ? totalEarned : (Number(data.total_earnings) || 0),
         });
       }
     } catch (error) {

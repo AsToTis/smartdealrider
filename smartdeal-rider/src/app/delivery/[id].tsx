@@ -56,6 +56,15 @@ export default function DeliveryRoute() {
       const response = await api.get(`/rider/jobs/${orderId}`);
       if (!response.data?.success) throw new Error(response.data?.message || 'ไม่พบข้อมูลงาน');
       const data = response.data.data as Job;
+      
+      // โครงสร้างค่าจัดส่งตาม System Control Panel (เริ่มต้น ฿35 + ฿8/กม. สำหรับ 2.5 กม. = ฿55.00)
+      const baseFare = 35;
+      const perKm = 8;
+      const distNum = parseFloat((data as any).distance) || 2.5;
+      const calculatedFare = Math.round(baseFare + (distNum * perKm));
+      const feeNum = parseFloat(data.delivery_fee as any) || 0;
+      data.delivery_fee = feeNum > 0 ? feeNum : calculatedFare;
+
       setJob(data);
       if (data.delivery_status) setStatus(data.delivery_status);
     } catch (error: any) {
