@@ -39,6 +39,24 @@ export default function RiderHomeScreen() {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [acceptingId, setAcceptingId] = useState<number | null>(null);
+  const [adminFare, setAdminFare] = useState({ baseFare: 35, perKm: 8, riderPercent: 100 });
+
+  const fetchAdminFare = async () => {
+    try {
+      const res = await api.get('/admin/settings');
+      if (res.data?.success && Array.isArray(res.data.settings)) {
+        const b = res.data.settings.find((s: any) => s.setting_key === 'base_delivery_fee');
+        const p = res.data.settings.find((s: any) => s.setting_key === 'per_km_fee');
+        const r = res.data.settings.find((s: any) => s.setting_key === 'rider_commission_percent');
+        setAdminFare({
+          baseFare: parseFloat(b?.setting_value) || 35,
+          perKm: parseFloat(p?.setting_value) || 8,
+          riderPercent: parseFloat(r?.setting_value) || 100,
+        });
+      }
+    } catch (e) {}
+  };
+
   
   const prevJobsCountRef = useRef(0);
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -86,8 +104,8 @@ export default function RiderHomeScreen() {
       if (response.data?.success) {
         const rawJobs = response.data.data || response.data.jobs || [];
         // โครงสร้างค่าจัดส่งตาม System Control Panel (เริ่มต้น ฿35 + ฿8/กม. สำหรับ 2.5 กม. = ฿55.00)
-        const baseFare = 35;
-        const perKm = 8;
+        const baseFare = adminFare.baseFare;
+        const perKm = adminFare.perKm;
         const newJobs = rawJobs.map((j: any) => {
           const distNum = parseFloat(j.distance) || 2.5;
           const calculatedFare = Math.round(baseFare + (distNum * perKm));
@@ -154,6 +172,7 @@ export default function RiderHomeScreen() {
       fetchJobs();
       fetchWallet();
       checkActiveDelivery();
+      fetchAdminFare();
       const interval = setInterval(() => {
         if (isOnline) {
           fetchJobs();
