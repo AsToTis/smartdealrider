@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -13,7 +13,7 @@ import {
   View
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_DEFAULT } from 'react-native-maps';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import api from '../../utils/api';
@@ -54,6 +54,7 @@ export default function DeliveryRoute() {
   const [status, setStatus] = useState<DeliveryStatus>('accepted');
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
+  const mapRef = useRef<MapView>(null);
 
   // Photo Verification Modals State
   const [photoModalVisible, setPhotoModalVisible] = useState(false);
@@ -91,6 +92,70 @@ export default function DeliveryRoute() {
   useEffect(() => {
     fetchJob();
   }, [id]);
+
+  // Coords & Map Calculations
+  const shopCoords = useMemo(() => {
+    const sLat = parseFloat(String(job?.shop_lat));
+    const sLng = parseFloat(String(job?.shop_lng));
+    if (!isNaN(sLat) && !isNaN(sLng) && sLat !== 0 && sLng !== 0) {
+      return { latitude: sLat, longitude: sLng };
+    }
+    return { latitude: 16.2354, longitude: 103.2515 }; // Default Mahasarakham
+  }, [job]);
+
+  const customerCoords = useMemo(() => {
+    const cLat = parseFloat(String(job?.customer_lat));
+    const cLng = parseFloat(String(job?.customer_lng));
+    if (!isNaN(cLat) && !isNaN(cLng) && cLat !== 0 && cLng !== 0) {
+      return { latitude: cLat, longitude: cLng };
+    }
+    return { latitude: shopCoords.latitude + 0.0108, longitude: shopCoords.longitude + 0.0084 };
+  }, [job, shopCoords]);
+
+  // Intermediate rider position depending on status
+  const riderCoords = useMemo(() => {
+    if (status === 'accepted' || status === 'arriving_shop') {
+      return {
+        latitude: shopCoords.latitude - 0.003,
+        longitude: shopCoords.longitude - 0.002,
+      };
+    }
+    if (status === 'delivering') {
+      return {
+        latitude: (shopCoords.latitude + customerCoords.latitude) / 2,
+        longitude: (shopCoords.longitude + customerCoords.longitude) / 2,
+      };
+    }
+    return customerCoords;
+  }, [status, shopCoords, customerCoords]);
+
+  const mapRegion = useMemo(() => {
+    const midLat = (shopCoords.latitude + customerCoords.latitude) / 2;
+    const midLng = (shopCoords.longitude + customerCoords.longitude) / 2;
+    const latDelta = Math.max(0.02, Math.abs(shopCoords.latitude - customerCoords.latitude) * 2.2);
+    const lngDelta = Math.max(0.02, Math.abs(shopCoords.longitude - customerCoords.longitude) * 2.2);
+    return {
+      latitude: midLat,
+      longitude: midLng,
+      latitudeDelta: latDelta,
+      longitudeDelta: lngDelta,
+    };
+  }, [shopCoords, customerCoords]);
+
+  // Center map on update
+  useEffect(() => {
+    if (job && mapRef.current) {
+      try {
+        mapRef.current.animateToRegion(mapRegion, 800);
+      } catch (e) {}
+    }
+  }, [job, mapRegion]);
+
+  const recenterMap = () => {
+    if (mapRef.current) {
+      mapRef.current.animateToRegion(mapRegion, 600);
+    }
+  };
 
   // Handle standard status advance (e.g. arriving_shop)
   const updateStatusSimple = async (nextStatus: DeliveryStatus) => {
@@ -174,7 +239,6 @@ export default function DeliveryRoute() {
     try {
       setUploadingPhoto(true);
       if (photoType === 'pickup') {
-        // Submit Pickup Proof (Shop -> Rider)
         const res = await api.post(`/rider/deliveries/${orderId}/pickup`, {
           rider_id: riderId,
           pickup_proof_image: capturedPhoto,
@@ -188,7 +252,6 @@ export default function DeliveryRoute() {
           throw new Error(res.data?.message || 'บันทึกรูปรับสินค้าไม่สำเร็จ');
         }
       } else {
-        // Submit Dropoff Proof (Rider -> Customer Complete)
         const res = await api.post(`/rider/deliveries/${orderId}/complete`, {
           rider_id: riderId,
           proof_image_base64: capturedPhoto,
@@ -213,10 +276,24 @@ export default function DeliveryRoute() {
   const openNavigation = async () => {
     if (!job) return;
     const toShop = status === 'accepted' || status === 'arriving_shop';
-    const lat = toShop ? job.shop_lat : job.customer_lat;
-    const lng = toShop ? job.shop_lng : job.customer_lng;
-    const destination = lat && lng ? `${lat},${lng}` : encodeURIComponent(toShop ? job.shop_address : job.customer_address);
-    await Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${destination}`);
+    const lat = toShop ? shopCoords.latitude : customerCoords.latitude;
+    const lng = toShop ? shopCoords.longitude : customerCoords.longitude;
+    const destination = `${lat},${lng}`;
+    const url = Platform.select({
+      ios: `maps:0,0?q=${encodeURIComponent(toShop ? job.shop_name : job.customer_name)}@${destination}`,
+      android: `google.navigation:q=${destination}&mode=d`,
+    }) || `https://www.google.com/maps/dir/?api=1&destination=${destination}`;
+    
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (supported) {
+        await Linking.openURL(url);
+      } else {
+        await Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${destination}`);
+      }
+    } catch (e) {
+      await Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${destination}`);
+    }
   };
 
   const makePhoneCall = (phoneNumber?: string) => {
@@ -238,13 +315,6 @@ export default function DeliveryRoute() {
     if (status === 'arriving_shop') return 1;
     return 0;
   }, [status]);
-
-  const region = useMemo(() => ({
-    latitude: Number(job?.shop_lat) || 13.7563,
-    longitude: Number(job?.shop_lng) || 100.5018,
-    latitudeDelta: 0.04,
-    longitudeDelta: 0.04
-  }), [job]);
 
   if (loading) {
     return (
@@ -323,32 +393,70 @@ export default function DeliveryRoute() {
           })}
         </View>
 
-        {/* Map Preview */}
+        {/* Dynamic Route Map View with Native & Visual Fallback */}
         <View style={styles.mapContainer}>
-          <MapView style={styles.map} initialRegion={region}>
-            <Marker
-              coordinate={{
-                latitude: Number(job.shop_lat) || region.latitude,
-                longitude: Number(job.shop_lng) || region.longitude
-              }}
-              title={job.shop_name}
-              pinColor="#059669"
+          <MapView 
+            ref={mapRef}
+            style={styles.map} 
+            provider={PROVIDER_DEFAULT}
+            initialRegion={mapRegion}
+            region={mapRegion}
+            showsUserLocation={false}
+            showsMyLocationButton={false}
+            showsCompass={true}
+            toolbarEnabled={false}
+          >
+            {/* Route Line connecting Shop -> Customer */}
+            <Polyline
+              coordinates={[shopCoords, riderCoords, customerCoords]}
+              strokeColor="#059669"
+              strokeWidth={4}
+              lineDashPattern={[6, 4]}
             />
-            {job.customer_lat && job.customer_lng && (
-              <Marker
-                coordinate={{
-                  latitude: Number(job.customer_lat),
-                  longitude: Number(job.customer_lng)
-                }}
-                title={job.customer_name}
-                pinColor="#ef4444"
-              />
-            )}
+
+            {/* Shop Marker */}
+            <Marker coordinate={shopCoords} title={job.shop_name} description={job.shop_address}>
+              <View style={styles.shopPinWrapper}>
+                <View style={styles.shopPinCircle}>
+                  <MaterialCommunityIcons name="storefront" size={16} color="#fff" />
+                </View>
+                <View style={styles.pinLabelBox}>
+                  <Text style={styles.pinLabelText} numberOfLines={1}>{job.shop_name}</Text>
+                </View>
+              </View>
+            </Marker>
+
+            {/* Customer Marker */}
+            <Marker coordinate={customerCoords} title={job.customer_name} description={job.customer_address}>
+              <View style={styles.customerPinWrapper}>
+                <View style={styles.customerPinCircle}>
+                  <Ionicons name="location" size={16} color="#fff" />
+                </View>
+                <View style={[styles.pinLabelBox, { borderColor: '#fca5a5' }]}>
+                  <Text style={[styles.pinLabelText, { color: '#ef4444' }]} numberOfLines={1}>จุดส่งลูกค้า</Text>
+                </View>
+              </View>
+            </Marker>
+
+            {/* Rider Animated Marker */}
+            <Marker coordinate={riderCoords} title="ตำแหน่งของคุณ">
+              <View style={styles.riderPinCircle}>
+                <MaterialCommunityIcons name="motorbike" size={18} color="#fff" />
+              </View>
+            </Marker>
           </MapView>
-          <TouchableOpacity style={styles.floatingNavBtn} onPress={openNavigation}>
-            <MaterialCommunityIcons name="google-maps" size={18} color="#fff" />
-            <Text style={styles.floatingNavText}>เปิดแผนที่นำทาง</Text>
-          </TouchableOpacity>
+
+          {/* Quick Map Action Floating Chips */}
+          <View style={styles.mapFloatingActions}>
+            <TouchableOpacity style={styles.recenterBtn} onPress={recenterMap}>
+              <Ionicons name="locate" size={18} color="#059669" />
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.floatingNavBtn} onPress={openNavigation}>
+              <Ionicons name="navigate" size={16} color="#fff" />
+              <Text style={styles.floatingNavText}>เปิดแผนที่นำทาง</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Earnings Banner */}
@@ -705,30 +813,129 @@ const styles = StyleSheet.create({
     backgroundColor: '#059669',
   },
   mapContainer: {
-    height: 180,
-    borderRadius: 20,
+    width: '100%',
+    height: 230,
+    borderRadius: 22,
     overflow: 'hidden',
     position: 'relative',
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
+    backgroundColor: '#e2e8f0',
+    borderWidth: 1.5,
+    borderColor: '#cbd5e1',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 3,
   },
   map: {
-    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+  },
+  shopPinWrapper: {
+    alignItems: 'center',
+  },
+  shopPinCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#059669',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  customerPinWrapper: {
+    alignItems: 'center',
+  },
+  customerPinCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#ef4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  riderPinCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#0284c7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
+    shadowColor: '#0284c7',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+    elevation: 5,
+  },
+  pinLabelBox: {
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#a7f3d0',
+    marginTop: 2,
+    maxWidth: 110,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  pinLabelText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#059669',
+    textAlign: 'center',
+  },
+  mapFloatingActions: {
+    position: 'absolute',
+    bottom: 10,
+    left: 10,
+    right: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  recenterBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 4,
   },
   floatingNavBtn: {
-    position: 'absolute',
-    bottom: 12,
-    right: 12,
     backgroundColor: '#059669',
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
     borderRadius: 20,
     gap: 6,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.2,
     shadowRadius: 4,
     elevation: 4,
   },
