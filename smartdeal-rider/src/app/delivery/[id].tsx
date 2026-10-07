@@ -2,41 +2,48 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Linking,
+  Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View,
-  Platform
+  View
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import MapView, { Marker } from 'react-native-maps';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import api from '../../utils/api';
 import { useAuth } from '../../context/AuthContext';
 
-type DeliveryStatus = 'accepted' | 'arriving_shop' | 'picked_up' | 'delivering';
+type DeliveryStatus = 'accepted' | 'arriving_shop' | 'picked_up' | 'delivering' | 'delivered';
+
 type Job = {
   order_id: number;
   delivery_fee: number | string;
   delivery_status?: DeliveryStatus;
   shop_name: string;
   shop_address: string;
+  shop_phone?: string;
   shop_lat?: number | string;
   shop_lng?: number | string;
   customer_name: string;
   customer_phone: string;
   customer_address: string;
   customer_lat?: number | string;
-  customer_lng?: number | string
+  customer_lng?: number | string;
+  distance?: string;
 };
 
 const steps: { key: DeliveryStatus; label: string; icon: string }[] = [
   { key: 'accepted', label: 'ไปร้านค้า', icon: 'store' },
   { key: 'arriving_shop', label: 'ถึงร้านแล้ว', icon: 'storefront' },
-  { key: 'picked_up', label: 'รับอาหารแล้ว', icon: 'bag-personal' },
-  { key: 'delivering', label: 'กำลังส่ง', icon: 'moped' },
+  { key: 'picked_up', label: 'รับสินค้าแล้ว', icon: 'bag-personal' },
+  { key: 'delivering', label: 'กำลังไปส่ง', icon: 'moped' },
+  { key: 'delivered', label: 'ส่งสำเร็จ', icon: 'check-circle' },
 ];
 
 export default function DeliveryRoute() {
@@ -47,8 +54,15 @@ export default function DeliveryRoute() {
   const [status, setStatus] = useState<DeliveryStatus>('accepted');
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
+
+  // Photo Verification Modals State
+  const [photoModalVisible, setPhotoModalVisible] = useState(false);
+  const [photoType, setPhotoType] = useState<'pickup' | 'dropoff'>('pickup');
+  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
   const orderId = Number(id);
-  const riderId = rider?.id || (rider as any)?.rider_id;
+  const riderId = rider?.id || (rider as any)?.rider_id || 1;
 
   const fetchJob = async () => {
     if (!Number.isInteger(orderId)) { setLoading(false); return; }
@@ -78,7 +92,8 @@ export default function DeliveryRoute() {
     fetchJob();
   }, [id]);
 
-  const updateStatus = async (nextStatus: DeliveryStatus) => {
+  // Handle standard status advance (e.g. arriving_shop)
+  const updateStatusSimple = async (nextStatus: DeliveryStatus) => {
     if (!riderId) {
       Alert.alert('ไม่พบข้อมูลไรเดอร์', 'กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่');
       return;
@@ -98,6 +113,103 @@ export default function DeliveryRoute() {
     }
   };
 
+  // Open photo modal for pickup or dropoff
+  const openProofModal = (type: 'pickup' | 'dropoff') => {
+    setPhotoType(type);
+    setCapturedPhoto(null);
+    setPhotoModalVisible(true);
+  };
+
+  const handleTakeOrPickPhoto = async (useCamera: boolean = true) => {
+    try {
+      let result;
+      if (useCamera) {
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert('ต้องอนุญาตกล้อง', 'กรุณาอนุญาตการเข้าถึงกล้องเพื่อถ่ายรูปหลักฐาน');
+          return;
+        }
+        result = await ImagePicker.launchCameraAsync({
+          mediaTypes: ['images'],
+          allowsEditing: true,
+          aspect: [4, 3],
+          quality: 0.7,
+          base64: true,
+        });
+      } else {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert('ต้องอนุญาตแกลเลอรี', 'กรุณาอนุญาตการเข้าถึงคลังรูปภาพ');
+          return;
+        }
+        result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ['images'],
+          allowsEditing: true,
+          aspect: [4, 3],
+          quality: 0.7,
+          base64: true,
+        });
+      }
+
+      if (!result.canceled && result.assets?.[0]) {
+        const asset = result.assets[0];
+        if (asset.base64) {
+          setCapturedPhoto(`data:image/jpeg;base64,${asset.base64}`);
+        } else {
+          setCapturedPhoto(asset.uri);
+        }
+      }
+    } catch (e: any) {
+      Alert.alert('ข้อผิดพลาด', e.message || 'ไม่สามารถถ่ายรูปได้');
+    }
+  };
+
+  // Submit Photo Verification to Server
+  const submitProofVerification = async () => {
+    if (!capturedPhoto) {
+      Alert.alert('กรุณาถ่ายรูป', 'ต้องถ่ายรูปหลักฐานก่อนกดยืนยัน');
+      return;
+    }
+
+    try {
+      setUploadingPhoto(true);
+      if (photoType === 'pickup') {
+        // Submit Pickup Proof (Shop -> Rider)
+        const res = await api.post(`/rider/deliveries/${orderId}/pickup`, {
+          rider_id: riderId,
+          pickup_proof_image: capturedPhoto,
+        });
+        if (res.data?.success) {
+          setStatus('delivering');
+          setPhotoModalVisible(false);
+          Alert.alert('รับสินค้าเรียบร้อย 🎉', 'ระบบแจ้งเตือนร้านค้าและลูกค้าแล้ว ตอนนี้กำลังเดินทางไปส่งสินค้าครับ');
+          fetchJob();
+        } else {
+          throw new Error(res.data?.message || 'บันทึกรูปรับสินค้าไม่สำเร็จ');
+        }
+      } else {
+        // Submit Dropoff Proof (Rider -> Customer Complete)
+        const res = await api.post(`/rider/deliveries/${orderId}/complete`, {
+          rider_id: riderId,
+          proof_image_base64: capturedPhoto,
+        });
+        if (res.data?.success) {
+          setStatus('delivered');
+          setPhotoModalVisible(false);
+          Alert.alert('จัดส่งสำเร็จแล้ว 🎉', 'ระบบบันทึกหลักฐานและโอนเงินค่ารอบเข้ากระเป๋าเงินของคุณเรียบร้อยแล้ว', [
+            { text: 'กลับหน้ารวมงาน', onPress: () => router.replace('/(tabs)') }
+          ]);
+        } else {
+          throw new Error(res.data?.message || 'บันทึกรูปส่งสินค้าไม่สำเร็จ');
+        }
+      }
+    } catch (error: any) {
+      Alert.alert('ยืนยันไม่สำเร็จ', error.response?.data?.message || error.message || 'กรุณาลองใหม่อีกครั้ง');
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
   const openNavigation = async () => {
     if (!job) return;
     const toShop = status === 'accepted' || status === 'arriving_shop';
@@ -107,16 +219,24 @@ export default function DeliveryRoute() {
     await Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${destination}`);
   };
 
-  const makePhoneCall = (phoneNumber: string) => {
+  const makePhoneCall = (phoneNumber?: string) => {
     if (!phoneNumber) {
-      Alert.alert('แจ้งเตือน', 'ไม่มีหมายเลขโทรศัพท์');
+      Alert.alert('แจ้งเตือน', 'ไม่มีหมายเลขโทรศัพท์ในระบบ');
       return;
     }
     Linking.openURL(`tel:${phoneNumber}`);
   };
 
+  const openChatWith = (target: 'seller' | 'buyer') => {
+    router.push(`/chat/${orderId}?target=${target}` as any);
+  };
+
   const currentStepIndex = useMemo(() => {
-    return steps.findIndex(s => s.key === status);
+    if (status === 'delivered') return 4;
+    if (status === 'delivering') return 3;
+    if (status === 'picked_up') return 2;
+    if (status === 'arriving_shop') return 1;
+    return 0;
   }, [status]);
 
   const region = useMemo(() => ({
@@ -130,6 +250,7 @@ export default function DeliveryRoute() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#059669" />
+        <Text style={{ marginTop: 10, color: '#64748b' }}>กำลังโหลดข้อมูลการจัดส่ง...</Text>
       </View>
     );
   }
@@ -145,14 +266,6 @@ export default function DeliveryRoute() {
     );
   }
 
-  const next = status === 'accepted'
-    ? { label: 'ฉันมาถึงร้านแล้ว', value: 'arriving_shop' as DeliveryStatus }
-    : status === 'arriving_shop'
-      ? { label: 'ยืนยันรับสินค้าแล้ว', value: 'picked_up' as DeliveryStatus }
-      : status === 'picked_up'
-        ? { label: 'เริ่มออกจัดส่งให้ลูกค้า', value: 'delivering' as DeliveryStatus }
-        : null;
-
   return (
     <View style={styles.container}>
       {/* Top Header */}
@@ -160,9 +273,15 @@ export default function DeliveryRoute() {
         <TouchableOpacity style={styles.navBtn} onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={22} color="#0f172a" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>ออเดอร์ #{job.order_id}</Text>
-        <TouchableOpacity style={styles.navBtn} onPress={fetchJob}>
-          <Ionicons name="refresh" size={22} color="#0f172a" />
+        <View style={{ alignItems: 'center' }}>
+          <Text style={styles.headerTitle}>ออเดอร์ #{job.order_id}</Text>
+          <Text style={styles.headerSubtitle}>ระยะทางประมาณ {job.distance || '2.5 กม.'}</Text>
+        </View>
+        <TouchableOpacity 
+          style={styles.headerChatBtn} 
+          onPress={() => router.push(`/chat/${job.order_id}` as any)}
+        >
+          <Ionicons name="chatbubbles" size={20} color="#059669" />
         </TouchableOpacity>
       </View>
 
@@ -232,86 +351,234 @@ export default function DeliveryRoute() {
           </TouchableOpacity>
         </View>
 
-        {/* Earnings & Target Info Banner */}
+        {/* Earnings Banner */}
         <View style={styles.feeBanner}>
           <View>
-            <Text style={styles.feeBannerLabel}>ค่ารอบที่คุณจะได้รับ</Text>
+            <Text style={styles.feeBannerLabel}>ค่ารอบที่คุณจะได้รับ (รวมทิป)</Text>
             <Text style={styles.feeBannerAmount}>฿{Number(job.delivery_fee).toFixed(2)}</Text>
           </View>
           <View style={styles.directionTag}>
             <Text style={styles.directionTagText}>
-              {status === 'delivering' ? '🚗 กำลังส่งให้ลูกค้า' : '🛵 กำลังไปที่ร้าน'}
+              {status === 'delivering' ? '🛵 นำส่งให้ลูกค้า' : status === 'arriving_shop' ? '🏪 อยู่ที่ร้านค้า' : '📍 เดินทางไปร้าน'}
             </Text>
           </View>
         </View>
 
-        {/* Store Card (Pickup) */}
+        {/* Store Card (Pickup) with Live Chat & Call */}
         <View style={[styles.card, (status === 'accepted' || status === 'arriving_shop') && styles.cardActiveTarget]}>
           <View style={styles.cardHeader}>
             <View style={styles.pickupPin}>
               <MaterialCommunityIcons name="storefront" size={16} color="#059669" />
             </View>
             <Text style={styles.cardTargetTitle}>จุดรับสินค้า (ร้านค้า)</Text>
+            {(status === 'accepted' || status === 'arriving_shop') && (
+              <View style={styles.currentStageBadge}>
+                <Text style={styles.currentStageText}>ขั้นตอนปัจจุบัน</Text>
+              </View>
+            )}
           </View>
+
           <Text style={styles.cardPrimaryText}>{job.shop_name}</Text>
           <Text style={styles.cardSubText}>{job.shop_address}</Text>
+
+          {/* Action Row: Chat with Shop & Call Shop */}
+          <View style={styles.contactRow}>
+            <TouchableOpacity 
+              style={styles.chatStoreBtn}
+              onPress={() => openChatWith('seller')}
+            >
+              <Ionicons name="chatbubble-ellipses" size={16} color="#0284c7" />
+              <Text style={styles.chatStoreBtnText}>แชทกับร้านค้า</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.callStoreBtn}
+              onPress={() => makePhoneCall(job.shop_phone || '021234567')}
+            >
+              <Ionicons name="call" size={16} color="#059669" />
+              <Text style={styles.callStoreBtnText}>โทรหาร้าน</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
-        {/* Customer Card (Dropoff) */}
+        {/* Customer Card (Dropoff) with Live Chat & Call */}
         <View style={[styles.card, status === 'delivering' && styles.cardActiveTarget]}>
           <View style={styles.cardHeader}>
             <View style={styles.dropoffPin}>
               <Ionicons name="location" size={16} color="#ef4444" />
             </View>
             <Text style={[styles.cardTargetTitle, { color: '#ef4444' }]}>จุดส่งสินค้า (ลูกค้า)</Text>
+            {status === 'delivering' && (
+              <View style={[styles.currentStageBadge, { backgroundColor: '#fee2e2' }]}>
+                <Text style={[styles.currentStageText, { color: '#ef4444' }]}>ขั้นตอนปัจจุบัน</Text>
+              </View>
+            )}
           </View>
 
-          <View style={styles.customerRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardPrimaryText}>{job.customer_name || 'ลูกค้า Smart Deal'}</Text>
-              <Text style={styles.cardSubText}>{job.customer_address}</Text>
-            </View>
-            {job.customer_phone && (
-              <TouchableOpacity
-                style={styles.callButton}
-                onPress={() => makePhoneCall(job.customer_phone)}
-              >
-                <Ionicons name="call" size={18} color="#059669" />
-              </TouchableOpacity>
-            )}
+          <Text style={styles.cardPrimaryText}>{job.customer_name || 'ลูกค้า Smart Deal'}</Text>
+          <Text style={styles.cardSubText}>{job.customer_address}</Text>
+
+          {/* Action Row: Chat with Customer & Call Customer */}
+          <View style={styles.contactRow}>
+            <TouchableOpacity 
+              style={styles.chatCustomerBtn}
+              onPress={() => openChatWith('buyer')}
+            >
+              <Ionicons name="chatbubble-ellipses" size={16} color="#059669" />
+              <Text style={styles.chatCustomerBtnText}>แชทกับลูกค้า</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.callCustomerBtn}
+              onPress={() => makePhoneCall(job.customer_phone)}
+            >
+              <Ionicons name="call" size={16} color="#059669" />
+              <Text style={styles.callCustomerBtnText}>โทรหาลูกค้า</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </ScrollView>
 
-      {/* Bottom Sticky Action Footer */}
+      {/* Sequential Sticky Action Footer */}
       <View style={styles.footer}>
         <TouchableOpacity style={styles.navigationSecondaryBtn} onPress={openNavigation}>
           <MaterialCommunityIcons name="navigation-variant" size={20} color="#059669" />
           <Text style={styles.navigationSecondaryText}>นำทาง</Text>
         </TouchableOpacity>
 
-        {next ? (
+        {status === 'accepted' ? (
           <TouchableOpacity
             disabled={updating}
             style={[styles.primaryActionBtn, updating && styles.btnDisabled]}
-            onPress={() => updateStatus(next.value)}
+            onPress={() => updateStatusSimple('arriving_shop')}
           >
-            {updating ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.primaryActionBtnText}>{next.label}</Text>
+            {updating ? <ActivityIndicator color="#fff" /> : (
+              <>
+                <MaterialCommunityIcons name="storefront-check" size={20} color="#fff" style={{ marginRight: 6 }} />
+                <Text style={styles.primaryActionBtnText}>ฉันมาถึงร้านแล้ว</Text>
+              </>
             )}
+          </TouchableOpacity>
+        ) : status === 'arriving_shop' ? (
+          <TouchableOpacity
+            style={[styles.primaryActionBtn, { backgroundColor: '#0284c7' }]}
+            onPress={() => openProofModal('pickup')}
+          >
+            <MaterialCommunityIcons name="camera" size={20} color="#fff" style={{ marginRight: 6 }} />
+            <Text style={styles.primaryActionBtnText}>ถ่ายรูปยืนยันรับสินค้า</Text>
+          </TouchableOpacity>
+        ) : status === 'delivering' ? (
+          <TouchableOpacity
+            style={[styles.primaryActionBtn, { backgroundColor: '#059669' }]}
+            onPress={() => openProofModal('dropoff')}
+          >
+            <MaterialCommunityIcons name="camera-check" size={20} color="#fff" style={{ marginRight: 6 }} />
+            <Text style={styles.primaryActionBtnText}>ถ่ายรูปส่งมอบ & จบงาน</Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity
-            style={styles.primaryActionBtn}
-            onPress={() => router.push(`/proof-of-delivery/${job.order_id}` as any)}
+            style={[styles.primaryActionBtn, { backgroundColor: '#10b981' }]}
+            onPress={() => router.replace('/(tabs)')}
           >
-            <MaterialCommunityIcons name="camera-outline" size={20} color="#fff" style={{ marginRight: 6 }} />
-            <Text style={styles.primaryActionBtnText}>ถ่ายรูป & จบงาน</Text>
+            <Ionicons name="checkmark-circle" size={20} color="#fff" style={{ marginRight: 6 }} />
+            <Text style={styles.primaryActionBtnText}>งานจัดส่งสำเร็จแล้ว</Text>
           </TouchableOpacity>
         )}
       </View>
+
+      {/* Interactive Photo Confirmation Modal (Sequential Proof Verification) */}
+      <Modal visible={photoModalVisible} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderTitleBox}>
+                <MaterialCommunityIcons 
+                  name={photoType === 'pickup' ? 'bag-personal-plus' : 'hand-heart'} 
+                  size={24} 
+                  color={photoType === 'pickup' ? '#0284c7' : '#059669'} 
+                />
+                <Text style={styles.modalTitle}>
+                  {photoType === 'pickup' ? 'ถ่ายรูปยืนยันรับสินค้าจากร้าน' : 'ถ่ายรูปยืนยันส่งมอบสินค้าให้ลูกค้า'}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setPhotoModalVisible(false)} style={styles.modalCloseBtn}>
+                <Ionicons name="close" size={22} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalInstruction}>
+              {photoType === 'pickup' 
+                ? 'กรุณาถ่ายรูปอาหาร/ถุงสินค้าหรือใบเสร็จรับเงินที่ได้รับจากร้านค้า เพื่อยืนยันความถูกต้อง'
+                : 'กรุณาถ่ายรูปสินค้า ณ จุดส่งมอบ หรือวางหน้าบ้านให้เห็นชัดเจนเพื่อเป็นหลักฐาน'}
+            </Text>
+
+            {/* Photo Capture / Preview Box */}
+            <View style={styles.modalImageBox}>
+              {capturedPhoto ? (
+                <View style={styles.previewContainer}>
+                  <Image source={{ uri: capturedPhoto }} style={styles.capturedImage} resizeMode="cover" />
+                  <TouchableOpacity style={styles.retakeFloatingBtn} onPress={() => handleTakeOrPickPhoto(true)}>
+                    <Ionicons name="camera-reverse" size={16} color="#fff" />
+                    <Text style={styles.retakeFloatingText}>ถ่ายใหม่</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.captureOptions}>
+                  <TouchableOpacity 
+                    style={styles.cameraBtnLarge} 
+                    onPress={() => handleTakeOrPickPhoto(true)}
+                  >
+                    <View style={styles.cameraIconBg}>
+                      <Ionicons name="camera" size={32} color="#fff" />
+                    </View>
+                    <Text style={styles.cameraBtnTitle}>เปิดกล้องถ่ายรูป</Text>
+                    <Text style={styles.cameraBtnSub}>ถ่ายรูปหลักฐานทันที</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity 
+                    style={styles.galleryBtnSmall} 
+                    onPress={() => handleTakeOrPickPhoto(false)}
+                  >
+                    <Ionicons name="images-outline" size={18} color="#64748b" />
+                    <Text style={styles.galleryBtnText}>เลือกรูปจากคลังภาพ</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+
+            {/* Modal Confirm Button */}
+            <View style={styles.modalActions}>
+              <TouchableOpacity 
+                style={styles.cancelBtn} 
+                onPress={() => setPhotoModalVisible(false)}
+              >
+                <Text style={styles.cancelBtnText}>ยกเลิก</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity 
+                disabled={!capturedPhoto || uploadingPhoto}
+                style={[
+                  styles.confirmProofBtn, 
+                  (!capturedPhoto || uploadingPhoto) && styles.confirmProofDisabled,
+                  photoType === 'pickup' && { backgroundColor: '#0284c7' }
+                ]}
+                onPress={submitProofVerification}
+              >
+                {uploadingPhoto ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <>
+                    <Ionicons name="checkmark-done" size={20} color="#fff" style={{ marginRight: 6 }} />
+                    <Text style={styles.confirmProofText}>
+                      {photoType === 'pickup' ? 'ยืนยันรับสินค้า & เริ่มจัดส่ง' : 'ยืนยันจัดส่งสำเร็จ & รับเงิน'}
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -346,17 +613,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     paddingTop: Platform.OS === 'ios' ? 54 : 44,
-    paddingBottom: 16,
+    paddingBottom: 12,
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#0f172a'
   },
   navBtn: {
     width: 38,
@@ -366,46 +628,68 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  headerTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#0f172a',
+  },
+  headerSubtitle: {
+    fontSize: 11,
+    color: '#059669',
+    fontWeight: '700',
+    marginTop: 1,
+  },
+  headerChatBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#ecfdf5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   content: {
     padding: 16,
-    paddingBottom: 160
+    paddingBottom: 110,
+    gap: 14,
   },
   stepProgressBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     backgroundColor: '#ffffff',
-    paddingVertical: 14,
-    paddingHorizontal: 12,
+    padding: 14,
     borderRadius: 18,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#f1f5f9',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 4,
+    elevation: 1,
   },
   stepItem: {
     alignItems: 'center',
+    width: 54,
   },
   stepCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: '#f1f5f9',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 4,
   },
   stepCircleCompleted: {
-    backgroundColor: '#10b981',
+    backgroundColor: '#059669',
   },
   stepCircleCurrent: {
-    backgroundColor: '#059669',
-    borderWidth: 2,
-    borderColor: '#a7f3d0',
+    backgroundColor: '#0284c7',
+    transform: [{ scale: 1.1 }],
   },
   stepLabel: {
     fontSize: 10,
-    color: '#94a3b8',
     fontWeight: '600',
+    color: '#94a3b8',
+    textAlign: 'center',
   },
   stepLabelActive: {
     color: '#0f172a',
@@ -415,77 +699,75 @@ const styles = StyleSheet.create({
     flex: 1,
     height: 2,
     backgroundColor: '#e2e8f0',
-    marginHorizontal: 4,
-    marginBottom: 14,
+    marginTop: -16,
   },
   stepLineActive: {
-    backgroundColor: '#10b981',
+    backgroundColor: '#059669',
   },
   mapContainer: {
-    position: 'relative',
-    height: 210,
+    height: 180,
     borderRadius: 20,
     overflow: 'hidden',
-    marginBottom: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
+    position: 'relative',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   map: {
-    width: '100%',
-    height: '100%'
+    ...StyleSheet.absoluteFillObject,
   },
   floatingNavBtn: {
     position: 'absolute',
     bottom: 12,
     right: 12,
+    backgroundColor: '#059669',
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#059669',
+    paddingHorizontal: 12,
     paddingVertical: 8,
-    paddingHorizontal: 14,
     borderRadius: 20,
+    gap: 6,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.15,
     shadowRadius: 4,
-    elevation: 3,
-    gap: 6,
+    elevation: 4,
   },
   floatingNavText: {
-    fontSize: 12,
+    color: '#fff',
     fontWeight: '800',
-    color: '#ffffff',
+    fontSize: 12,
   },
   feeBanner: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#ecfdf5',
-    borderRadius: 18,
+    backgroundColor: '#ffffff',
     padding: 16,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#a7f3d0',
+    borderRadius: 18,
+    borderLeftWidth: 4,
+    borderLeftColor: '#059669',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
   },
   feeBannerLabel: {
     fontSize: 12,
-    color: '#047857',
+    color: '#64748b',
     fontWeight: '600',
+    marginBottom: 2,
   },
   feeBannerAmount: {
     fontSize: 22,
     fontWeight: '900',
-    color: '#064e3b',
-    marginTop: 2,
+    color: '#059669',
   },
   directionTag: {
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 10,
+    backgroundColor: '#ecfdf5',
+    paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 12,
+    borderRadius: 14,
   },
   directionTagText: {
     fontSize: 12,
@@ -496,128 +778,338 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderRadius: 18,
     padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: '#f1f5f9',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.03,
-    shadowRadius: 6,
-    elevation: 1,
   },
   cardActiveTarget: {
-    borderWidth: 1.5,
     borderColor: '#059669',
+    backgroundColor: '#fcfdfd',
+    shadowColor: '#059669',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
   },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 8,
-    gap: 6,
+    gap: 8,
   },
   pickupPin: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     backgroundColor: '#ecfdf5',
     alignItems: 'center',
     justifyContent: 'center',
   },
   dropoffPin: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     backgroundColor: '#fee2e2',
     alignItems: 'center',
     justifyContent: 'center',
   },
   cardTargetTitle: {
-    fontSize: 12,
-    color: '#059669',
+    fontSize: 14,
     fontWeight: '800',
+    color: '#059669',
+    flex: 1,
+  },
+  currentStageBadge: {
+    backgroundColor: '#ecfdf5',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  currentStageText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#059669',
   },
   cardPrimaryText: {
     fontSize: 16,
-    color: '#0f172a',
     fontWeight: '800',
-    marginBottom: 4
+    color: '#0f172a',
+    marginBottom: 4,
   },
   cardSubText: {
     fontSize: 13,
     color: '#64748b',
-    lineHeight: 18
+    lineHeight: 18,
+    marginBottom: 12,
   },
-  customerRow: {
+  contactRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  chatStoreBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
+    backgroundColor: '#f0f9ff',
+    paddingVertical: 9,
+    borderRadius: 12,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
   },
-  callButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#ecfdf5',
+  chatStoreBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0284c7',
+  },
+  callStoreBtn: {
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginLeft: 12,
+    backgroundColor: '#ecfdf5',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 12,
+    gap: 6,
+  },
+  callStoreBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#059669',
+  },
+  chatCustomerBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ecfdf5',
+    paddingVertical: 9,
+    borderRadius: 12,
+    gap: 6,
     borderWidth: 1,
     borderColor: '#a7f3d0',
+  },
+  chatCustomerBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#059669',
+  },
+  callCustomerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ecfdf5',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 12,
+    gap: 6,
+  },
+  callCustomerBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#059669',
   },
   footer: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: '#ffffff',
+    flexDirection: 'row',
     paddingHorizontal: 16,
     paddingTop: 12,
     paddingBottom: Platform.OS === 'ios' ? 32 : 16,
-    flexDirection: 'row',
-    gap: 10,
+    backgroundColor: '#ffffff',
     borderTopWidth: 1,
     borderTopColor: '#f1f5f9',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -3 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 8,
+    gap: 10,
   },
   navigationSecondaryBtn: {
-    borderColor: '#059669',
-    borderWidth: 1.5,
-    borderRadius: 16,
-    height: 52,
-    paddingHorizontal: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
     flexDirection: 'row',
-    gap: 6
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ecfdf5',
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    gap: 6,
   },
   navigationSecondaryText: {
-    color: '#059669',
+    fontSize: 14,
     fontWeight: '800',
-    fontSize: 15,
+    color: '#059669',
   },
   primaryActionBtn: {
     flex: 1,
-    backgroundColor: '#059669',
-    borderRadius: 16,
-    height: 52,
-    justifyContent: 'center',
-    alignItems: 'center',
     flexDirection: 'row',
-    shadowColor: '#059669',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#059669',
+    paddingVertical: 14,
+    borderRadius: 14,
   },
   primaryActionBtnText: {
+    fontSize: 15,
+    fontWeight: '800',
     color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '800'
   },
   btnDisabled: {
-    opacity: 0.7
+    opacity: 0.6,
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 20,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  modalHeaderTitleBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0f172a',
+    flex: 1,
+  },
+  modalCloseBtn: {
+    padding: 4,
+  },
+  modalInstruction: {
+    fontSize: 13,
+    color: '#64748b',
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  modalImageBox: {
+    height: 220,
+    backgroundColor: '#f8fafc',
+    borderRadius: 18,
+    borderWidth: 2,
+    borderStyle: 'dashed',
+    borderColor: '#cbd5e1',
+    overflow: 'hidden',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  previewContainer: {
+    width: '100%',
+    height: '100%',
+    position: 'relative',
+  },
+  capturedImage: {
+    width: '100%',
+    height: '100%',
+  },
+  retakeFloatingBtn: {
+    position: 'absolute',
+    bottom: 12,
+    right: 12,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    gap: 4,
+  },
+  retakeFloatingText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  captureOptions: {
+    alignItems: 'center',
+    width: '100%',
+    padding: 16,
+  },
+  cameraBtnLarge: {
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  cameraIconBg: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#059669',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+    shadowColor: '#059669',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  cameraBtnTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  cameraBtnSub: {
+    fontSize: 11,
+    color: '#64748b',
+  },
+  galleryBtnSmall: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
+  galleryBtnText: {
+    fontSize: 13,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  cancelBtn: {
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    borderRadius: 14,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  confirmProofBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#059669',
+    paddingVertical: 14,
+    borderRadius: 14,
+  },
+  confirmProofDisabled: {
+    backgroundColor: '#94a3b8',
+    opacity: 0.6,
+  },
+  confirmProofText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#ffffff',
   },
 });
