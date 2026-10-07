@@ -24,7 +24,10 @@ export default function LoginScreen() {
 
     setLoading(true);
     try {
-      const response = await api.post('/rider/login', { email, password });
+      const trimmedEmail = email.trim();
+      const trimmedPassword = password.trim();
+      console.log('SENDING LOGIN REQUEST:', { email: trimmedEmail, password: trimmedPassword });
+      const response = await api.post('/rider/login', { email: trimmedEmail, password: trimmedPassword });
       
       const { token, rider } = response.data;
       login(token, rider);
