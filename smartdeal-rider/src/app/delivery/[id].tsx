@@ -580,16 +580,16 @@ export default function DeliveryRoute() {
             style={[styles.primaryActionBtn, { backgroundColor: '#059669' }]}
             onPress={() => openProofModal('dropoff')}
           >
-            <MaterialCommunityIcons name="camera-check" size={20} color="#fff" style={{ marginRight: 6 }} />
-            <Text style={styles.primaryActionBtnText}>ถ่ายรูปส่งมอบ & จบงาน</Text>
+            <Ionicons name="camera" size={20} color="#fff" style={{ marginRight: 8 }} />
+            <Text style={styles.primaryActionBtnText}>ถ่ายรูปส่งมอบสินค้า</Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity
             style={[styles.primaryActionBtn, { backgroundColor: '#10b981' }]}
             onPress={() => router.replace('/(tabs)')}
           >
-            <Ionicons name="checkmark-circle" size={20} color="#fff" style={{ marginRight: 6 }} />
-            <Text style={styles.primaryActionBtnText}>งานจัดส่งสำเร็จแล้ว</Text>
+            <Ionicons name="checkmark-done-circle" size={22} color="#fff" style={{ marginRight: 8 }} />
+            <Text style={styles.primaryActionBtnText}>ส่งมอบแล้ว (รอลูกค้ายืนยัน)</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -601,7 +601,7 @@ export default function DeliveryRoute() {
             <View style={styles.modalHeader}>
               <View style={styles.modalHeaderTitleBox}>
                 <MaterialCommunityIcons 
-                  name={photoType === 'pickup' ? 'bag-personal-plus' : 'hand-heart'} 
+                  name={photoType === 'pickup' ? 'storefront' : 'home'} 
                   size={24} 
                   color={photoType === 'pickup' ? '#0284c7' : '#059669'} 
                 />
