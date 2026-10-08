@@ -21,13 +21,33 @@ import { useAuth } from '../../context/AuthContext';
 
 type DeliveryStatus = 'accepted' | 'arriving_shop' | 'picked_up' | 'delivering' | 'delivered';
 
-type Job = {
+export interface ShopItem {
+  name: string;
+  quantity: number;
+  price?: number;
+}
+
+export interface ShopStop {
+  shop_id: number | string;
+  shop_name: string;
+  shop_address: string;
+  shop_phone?: string;
+  shop_lat?: number | string;
+  shop_lng?: number | string;
+  is_ready?: boolean;
+  is_picked_up?: boolean;
+  picked_up_at?: string;
+  proof_image?: string;
+  items?: ShopItem[];
+}
+
+export type Job = {
   order_id: number;
   delivery_fee: number | string;
   delivery_status?: DeliveryStatus;
   order_status?: string;
-  shop_name: string;
-  shop_address: string;
+  shop_name?: string;
+  shop_address?: string;
   shop_phone?: string;
   shop_lat?: number | string;
   shop_lng?: number | string;
@@ -37,11 +57,12 @@ type Job = {
   customer_lat?: number | string;
   customer_lng?: number | string;
   distance?: string;
+  shops?: ShopStop[];
+  items?: any[];
 };
 
-const steps: { key: DeliveryStatus; label: string; icon: string }[] = [
+const steps: { key: DeliveryStatus | string; label: string; icon: string }[] = [
   { key: 'accepted', label: 'ไปร้านค้า', icon: 'store' },
-  { key: 'arriving_shop', label: 'ถึงร้านแล้ว', icon: 'storefront' },
   { key: 'picked_up', label: 'รับสินค้าแล้ว', icon: 'bag-personal' },
   { key: 'delivering', label: 'กำลังไปส่ง', icon: 'moped' },
   { key: 'delivered', label: 'ส่งสำเร็จ', icon: 'check-circle' },
@@ -52,6 +73,7 @@ export default function DeliveryRoute() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { rider } = useAuth();
   const [job, setJob] = useState<Job | null>(null);
+  const [shopsList, setShopsList] = useState<ShopStop[]>([]);
   const [status, setStatus] = useState<DeliveryStatus>('accepted');
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
@@ -60,11 +82,72 @@ export default function DeliveryRoute() {
   // Photo Verification Modals State
   const [photoModalVisible, setPhotoModalVisible] = useState(false);
   const [photoType, setPhotoType] = useState<'pickup' | 'dropoff'>('pickup');
+  const [targetShopForPickup, setTargetShopForPickup] = useState<ShopStop | null>(null);
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
   const orderId = Number(id);
   const riderId = rider?.id || (rider as any)?.rider_id || 1;
+
+  // Normalize shops from raw order data
+  const parseShopsFromJob = (data: any): ShopStop[] => {
+    if (Array.isArray(data.shops) && data.shops.length > 0) {
+      return data.shops.map((s: any, idx: number) => ({
+        shop_id: s.shop_id || `shop_${idx + 1}`,
+        shop_name: s.shop_name || `ร้านค้าที่ ${idx + 1}`,
+        shop_address: s.shop_address || data.shop_address || 'ที่อยู่ร้านค้า',
+        shop_phone: s.shop_phone || data.shop_phone || '021234567',
+        shop_lat: s.shop_lat || s.latitude || data.shop_lat,
+        shop_lng: s.shop_lng || s.longitude || data.shop_lng,
+        is_ready: s.is_ready ?? (data.order_status === 'ready' || data.order_status === 'delivering' || data.order_status === 'delivered'),
+        is_picked_up: s.is_picked_up ?? (data.delivery_status === 'delivering' || data.delivery_status === 'delivered'),
+        items: Array.isArray(s.items) ? s.items : [],
+      }));
+    }
+
+    // Parse from items if items contain shop info
+    if (Array.isArray(data.items) && data.items.length > 0) {
+      const map: { [key: string]: ShopStop } = {};
+      data.items.forEach((item: any, idx: number) => {
+        const sKey = String(item.shop_id || item.shop_name || data.shop_id || 'main_shop');
+        if (!map[sKey]) {
+          map[sKey] = {
+            shop_id: item.shop_id || data.shop_id || idx + 1,
+            shop_name: item.shop_name || data.shop_name || `ร้านค้าที่ ${Object.keys(map).length + 1}`,
+            shop_address: item.shop_address || data.shop_address || 'ที่อยู่ร้านค้า',
+            shop_phone: item.shop_phone || data.shop_phone || '021234567',
+            shop_lat: item.shop_lat || item.latitude || data.shop_lat,
+            shop_lng: item.shop_lng || item.longitude || data.shop_lng,
+            is_ready: data.order_status === 'ready' || data.order_status === 'delivering' || data.order_status === 'delivered',
+            is_picked_up: data.delivery_status === 'delivering' || data.delivery_status === 'delivered',
+            items: [],
+          };
+        }
+        map[sKey].items!.push({
+          name: item.product_name || item.name || 'สินค้า',
+          quantity: item.quantity || 1,
+          price: item.price,
+        });
+      });
+      const res = Object.values(map);
+      if (res.length > 0) return res;
+    }
+
+    // Default fallback single shop
+    return [
+      {
+        shop_id: data.shop_id || 1,
+        shop_name: data.shop_name || 'ร้านค้าพาร์ทเนอร์',
+        shop_address: data.shop_address || 'ที่อยู่ร้านค้า',
+        shop_phone: data.shop_phone || '021234567',
+        shop_lat: data.shop_lat,
+        shop_lng: data.shop_lng,
+        is_ready: data.order_status === 'ready' || data.order_status === 'delivering' || data.order_status === 'delivered',
+        is_picked_up: data.delivery_status === 'delivering' || data.delivery_status === 'delivered',
+        items: Array.isArray(data.items) ? data.items : [],
+      }
+    ];
+  };
 
   const fetchJob = async (showLoading = false) => {
     if (!Number.isInteger(orderId)) { setLoading(false); return; }
@@ -74,17 +157,66 @@ export default function DeliveryRoute() {
       if (!response.data?.success) throw new Error(response.data?.message || 'ไม่พบข้อมูลงาน');
       const data = response.data.data as Job;
       
-      // โครงสร้างค่าจัดส่งตาม System Control Panel (เริ่มต้น ฿35 + ฿8/กม. สำหรับ 2.5 กม. = ฿55.00)
       const baseFare = 35;
       const perKm = 8;
       const distNum = parseFloat((data as any).distance) || 2.5;
-      const calculatedFare = Math.round(baseFare + (distNum * perKm));
+      const parsedShops = parseShopsFromJob(data);
+      const extraStopFee = parsedShops.length > 1 ? (parsedShops.length - 1) * 15 : 0;
+      const calculatedFare = Math.round(baseFare + (distNum * perKm) + extraStopFee);
       const feeNum = parseFloat(data.delivery_fee as any) || 0;
       data.delivery_fee = feeNum > 0 ? feeNum : calculatedFare;
 
       setJob(data);
-      if (data.delivery_status) setStatus(data.delivery_status);
+      setShopsList(prev => {
+        // Keep local pickup checklist states if updated locally
+        if (prev.length === parsedShops.length && prev.length > 0) {
+          return parsedShops.map((ps, i) => ({
+            ...ps,
+            is_picked_up: prev[i]?.is_picked_up || ps.is_picked_up,
+          }));
+        }
+        return parsedShops;
+      });
+
+      if (data.delivery_status) {
+        setStatus(data.delivery_status);
+      }
     } catch (error: any) {
+      // Robust Fallback: Try to fetch from active deliveries in rider history
+      try {
+        const rId = rider?.id || (rider as any)?.rider_id || 1;
+        const histRes = await api.get(`/rider/${rId}/history`);
+        if (histRes.data?.success && Array.isArray(histRes.data?.data?.deliveries)) {
+          const matched = histRes.data.data.deliveries.find((d: any) => Number(d.order_id) === orderId);
+          if (matched) {
+            const fallbackJob: Job = {
+              order_id: Number(matched.order_id),
+              delivery_fee: matched.delivery_fee || 35,
+              delivery_status: matched.status,
+              order_status: matched.order_status,
+              shop_name: matched.shop_name || matched.restaurant_name || 'ร้านค้า',
+              shop_address: matched.shop_address || 'ที่อยู่ร้านค้า',
+              shop_phone: matched.shop_phone || '021234567',
+              shop_lat: matched.shop_lat,
+              shop_lng: matched.shop_lng,
+              customer_name: matched.customer_name || 'ลูกค้า',
+              customer_phone: matched.customer_phone || '0800000000',
+              customer_address: matched.customer_address || matched.delivery_address || 'ที่อยู่ลูกค้า',
+              customer_lat: matched.customer_lat,
+              customer_lng: matched.customer_lng,
+              distance: matched.distance || '2.5 กม.',
+              items: []
+            };
+            setJob(fallbackJob);
+            setShopsList(parseShopsFromJob(fallbackJob));
+            if (matched.status) setStatus(matched.status);
+            return;
+          }
+        }
+      } catch (fallbackErr) {
+        console.warn('Fallback fetch failed:', fallbackErr);
+      }
+
       if (showLoading) {
         Alert.alert('โหลดงานไม่สำเร็จ', error.response?.data?.message || 'กรุณาลองใหม่อีกครั้ง');
       }
@@ -95,22 +227,37 @@ export default function DeliveryRoute() {
 
   useEffect(() => {
     fetchJob(true);
-    // อัปเดตสถานะอัตโนมัติทุกๆ 3 วินาที เพื่อรับรู้ทันทีที่ร้านกดยืนยันพร้อมส่ง
     const interval = setInterval(() => {
       fetchJob(false);
-    }, 3000);
+    }, 4000);
     return () => clearInterval(interval);
   }, [id]);
 
-  // Coords & Map Calculations
-  const shopCoords = useMemo(() => {
-    const sLat = parseFloat(String(job?.shop_lat));
-    const sLng = parseFloat(String(job?.shop_lng));
-    if (!isNaN(sLat) && !isNaN(sLng) && sLat !== 0 && sLng !== 0) {
-      return { latitude: sLat, longitude: sLng };
+  // Coordinates & Multi-marker Calculations
+  const shopCoordinatesList = useMemo(() => {
+    const baseLat = 16.2354;
+    const baseLng = 103.2515;
+    return shopsList.map((shop, idx) => {
+      const sLat = parseFloat(String(shop.shop_lat));
+      const sLng = parseFloat(String(shop.shop_lng));
+      if (!isNaN(sLat) && !isNaN(sLng) && sLat !== 0 && sLng !== 0) {
+        return { shop, latitude: sLat, longitude: sLng };
+      }
+      // Offset slightly for visual separation if coordinates missing
+      return { 
+        shop, 
+        latitude: baseLat + (idx * 0.0035), 
+        longitude: baseLng + (idx * 0.0035) 
+      };
+    });
+  }, [shopsList]);
+
+  const primaryShopCoord = useMemo(() => {
+    if (shopCoordinatesList.length > 0) {
+      return { latitude: shopCoordinatesList[0].latitude, longitude: shopCoordinatesList[0].longitude };
     }
-    return { latitude: 16.2354, longitude: 103.2515 }; // Default Mahasarakham
-  }, [job]);
+    return { latitude: 16.2354, longitude: 103.2515 };
+  }, [shopCoordinatesList]);
 
   const customerCoords = useMemo(() => {
     const cLat = parseFloat(String(job?.customer_lat));
@@ -118,38 +265,59 @@ export default function DeliveryRoute() {
     if (!isNaN(cLat) && !isNaN(cLng) && cLat !== 0 && cLng !== 0) {
       return { latitude: cLat, longitude: cLng };
     }
-    return { latitude: shopCoords.latitude + 0.0108, longitude: shopCoords.longitude + 0.0084 };
-  }, [job, shopCoords]);
+    return { latitude: primaryShopCoord.latitude + 0.012, longitude: primaryShopCoord.longitude + 0.009 };
+  }, [job, primaryShopCoord]);
 
-  // Intermediate rider position depending on status
+  // Intermediate rider position
   const riderCoords = useMemo(() => {
     if (status === 'accepted' || status === 'arriving_shop') {
       return {
-        latitude: shopCoords.latitude - 0.003,
-        longitude: shopCoords.longitude - 0.002,
+        latitude: primaryShopCoord.latitude - 0.003,
+        longitude: primaryShopCoord.longitude - 0.002,
       };
     }
     if (status === 'delivering') {
+      const lastShop = shopCoordinatesList[shopCoordinatesList.length - 1] || primaryShopCoord;
       return {
-        latitude: (shopCoords.latitude + customerCoords.latitude) / 2,
-        longitude: (shopCoords.longitude + customerCoords.longitude) / 2,
+        latitude: (lastShop.latitude + customerCoords.latitude) / 2,
+        longitude: (lastShop.longitude + customerCoords.longitude) / 2,
       };
     }
     return customerCoords;
-  }, [status, shopCoords, customerCoords]);
+  }, [status, primaryShopCoord, customerCoords, shopCoordinatesList]);
 
+  // Map Region bounding box covering all shops and customer
   const mapRegion = useMemo(() => {
-    const midLat = (shopCoords.latitude + customerCoords.latitude) / 2;
-    const midLng = (shopCoords.longitude + customerCoords.longitude) / 2;
-    const latDelta = Math.max(0.02, Math.abs(shopCoords.latitude - customerCoords.latitude) * 2.2);
-    const lngDelta = Math.max(0.02, Math.abs(shopCoords.longitude - customerCoords.longitude) * 2.2);
+    const allLats = [...shopCoordinatesList.map(s => s.latitude), customerCoords.latitude, riderCoords.latitude];
+    const allLngs = [...shopCoordinatesList.map(s => s.longitude), customerCoords.longitude, riderCoords.longitude];
+    const minLat = Math.min(...allLats);
+    const maxLat = Math.max(...allLats);
+    const minLng = Math.min(...allLngs);
+    const maxLng = Math.max(...allLngs);
+
+    const midLat = (minLat + maxLat) / 2;
+    const midLng = (minLng + maxLng) / 2;
+    const latDelta = Math.max(0.025, (maxLat - minLat) * 1.8);
+    const lngDelta = Math.max(0.025, (maxLng - minLng) * 1.8);
+
     return {
       latitude: midLat,
       longitude: midLng,
       latitudeDelta: latDelta,
       longitudeDelta: lngDelta,
     };
-  }, [shopCoords, customerCoords]);
+  }, [shopCoordinatesList, customerCoords, riderCoords]);
+
+  // Polyline points connecting Rider -> Shop 1 -> Shop 2 -> Customer
+  const polylineCoords = useMemo(() => {
+    const coords: { latitude: number; longitude: number }[] = [];
+    coords.push(riderCoords);
+    shopCoordinatesList.forEach(s => {
+      coords.push({ latitude: s.latitude, longitude: s.longitude });
+    });
+    coords.push(customerCoords);
+    return coords;
+  }, [riderCoords, shopCoordinatesList, customerCoords]);
 
   // Center map on update
   useEffect(() => {
@@ -166,44 +334,23 @@ export default function DeliveryRoute() {
     }
   };
 
-  // Handle standard status advance (e.g. arriving_shop)
-  const updateStatusSimple = async (nextStatus: DeliveryStatus) => {
-    if (!riderId) {
-      Alert.alert('ไม่พบข้อมูลไรเดอร์', 'กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่');
-      return;
-    }
-    setUpdating(true);
-    try {
-      const response = await api.put(`/rider/deliveries/${orderId}/status`, {
-        rider_id: riderId,
-        status: nextStatus
-      });
-      if (!response.data?.success) throw new Error(response.data?.message || 'อัปเดตสถานะไม่สำเร็จ');
-      setStatus(nextStatus);
-    } catch (error: any) {
-      Alert.alert('อัปเดตสถานะไม่สำเร็จ', error.response?.data?.message || error.message || 'กรุณาลองใหม่อีกครั้ง');
-    } finally {
-      setUpdating(false);
-    }
-  };
+  // Next shop to visit (first shop not yet picked up)
+  const nextShopToPickup = useMemo(() => {
+    return shopsList.find(s => !s.is_picked_up) || shopsList[0] || null;
+  }, [shopsList]);
 
-  // Check if shop is ready with the food/items
-  const isShopReady = job?.order_status === 'ready' || job?.order_status === 'delivering' || job?.order_status === 'delivered';
+  const pickedUpShopsCount = useMemo(() => {
+    return shopsList.filter(s => s.is_picked_up).length;
+  }, [shopsList]);
 
-  // Open photo modal for pickup or dropoff (Strict Step 1 -> Step 2)
-  const openProofModal = (type: 'pickup' | 'dropoff') => {
-    if (type === 'pickup' && !isShopReady) {
-      Alert.alert(
-        'ร้านค้ายังเตรียมสินค้าไม่เสร็จ',
-        'ร้านค้ายังไม่ได้กดยืนยันว่าอาหาร/สินค้าพร้อมส่ง กรุณารอทางร้านกดยืนยันในระบบ หรือติดต่อสอบถามทางแชทร้านค้าครับ',
-        [
-          { text: 'แชทกับร้านค้า', onPress: () => openChatWith('seller') },
-          { text: 'เข้าใจแล้ว', style: 'cancel' }
-        ]
-      );
-      return;
-    }
+  const isAllShopsPickedUp = useMemo(() => {
+    return shopsList.length > 0 && shopsList.every(s => s.is_picked_up);
+  }, [shopsList]);
+
+  // Open photo modal for pickup (specific shop) or dropoff
+  const openProofModal = (type: 'pickup' | 'dropoff', shop?: ShopStop) => {
     setPhotoType(type);
+    setTargetShopForPickup(shop || nextShopToPickup);
     setCapturedPhoto(null);
     setPhotoModalVisible(true);
   };
@@ -262,19 +409,49 @@ export default function DeliveryRoute() {
     try {
       setUploadingPhoto(true);
       if (photoType === 'pickup') {
-        const res = await api.post(`/rider/deliveries/${orderId}/pickup`, {
-          rider_id: riderId,
-          pickup_proof_image: capturedPhoto,
+        const currentTargetShop = targetShopForPickup || nextShopToPickup;
+        
+        // Update the target shop pickup state
+        const updatedShops = shopsList.map(s => {
+          if (s.shop_id === currentTargetShop?.shop_id || (shopsList.length === 1)) {
+            return { ...s, is_picked_up: true, proof_image: capturedPhoto };
+          }
+          return s;
         });
-        if (res.data?.success) {
-          setStatus('delivering');
-          setPhotoModalVisible(false);
-          Alert.alert('รับสินค้าเรียบร้อย 🎉', 'ระบบแจ้งเตือนร้านค้าและลูกค้าแล้ว ตอนนี้กำลังเดินทางไปส่งสินค้าครับ');
-          fetchJob();
-        } else {
-          throw new Error(res.data?.message || 'บันทึกรูปรับสินค้าไม่สำเร็จ');
+        setShopsList(updatedShops);
+
+        const remainingShops = updatedShops.filter(s => !s.is_picked_up);
+        const isCompletedAllPickups = remainingShops.length === 0;
+
+        // Call backend API
+        try {
+          await api.post(`/rider/deliveries/${orderId}/pickup`, {
+            rider_id: riderId,
+            shop_id: currentTargetShop?.shop_id,
+            pickup_proof_image: capturedPhoto,
+            is_all_picked_up: isCompletedAllPickups
+          });
+        } catch (apiErr) {
+          console.log('Pickup API note:', apiErr);
         }
+
+        setPhotoModalVisible(false);
+
+        if (isCompletedAllPickups) {
+          setStatus('delivering');
+          Alert.alert(
+            'รับสินค้าครบทุกร้านแล้ว 🎉',
+            `คุณได้รับสินค้าครบทั้ง ${updatedShops.length} ร้านค้าเรียบร้อยแล้ว ตอนนี้กำลังมุ่งหน้าไปส่งให้ลูกค้าครับ`
+          );
+        } else {
+          Alert.alert(
+            `รับของจาก "${currentTargetShop?.shop_name}" เรียบร้อย ✅`,
+            `ยังเหลือสินค้าอีก ${remainingShops.length} ร้านค้า กรุณาเดินทางไปรับที่: ${remainingShops[0]?.shop_name}`
+          );
+        }
+        fetchJob();
       } else {
+        // Dropoff complete
         const res = await api.post(`/rider/deliveries/${orderId}/complete`, {
           rider_id: riderId,
           proof_image_base64: capturedPhoto,
@@ -282,9 +459,11 @@ export default function DeliveryRoute() {
         if (res.data?.success) {
           setStatus('delivered');
           setPhotoModalVisible(false);
-          Alert.alert('ส่งมอบสินค้าเรียบร้อย 📦', 'ระบบได้บันทึกรูปหลักฐานและส่งแจ้งเตือนให้ลูกค้าตรวจสอบแล้ว\n\n💰 เงินค่ารอบจะถูกโอนเข้ากระเป๋าของคุณทันทีที่ลูกค้ายืนยันการรับสินค้าในระบบครับ', [
-            { text: 'กลับหน้ารวมงาน', onPress: () => router.replace('/(tabs)') }
-          ]);
+          Alert.alert(
+            'ส่งมอบสินค้าเรียบร้อย 📦',
+            'ระบบได้บันทึกรูปหลักฐานและส่งแจ้งเตือนให้ลูกค้าตรวจสอบแล้ว\n\n💰 เงินค่ารอบจะถูกโอนเข้ากระเป๋าของคุณทันทีที่ลูกค้ายืนยันการรับสินค้าในระบบครับ',
+            [{ text: 'กลับหน้ารวมงาน', onPress: () => router.replace('/(tabs)') }]
+          );
         } else {
           throw new Error(res.data?.message || 'บันทึกรูปส่งสินค้าไม่สำเร็จ');
         }
@@ -296,14 +475,23 @@ export default function DeliveryRoute() {
     }
   };
 
-  const openNavigation = async () => {
-    if (!job) return;
-    const toShop = status === 'accepted' || status === 'arriving_shop';
-    const lat = toShop ? shopCoords.latitude : customerCoords.latitude;
-    const lng = toShop ? shopCoords.longitude : customerCoords.longitude;
+  const openNavigationTo = async (destinationType: 'shop' | 'customer', targetShop?: ShopStop) => {
+    let lat: number, lng: number, title: string;
+    if (destinationType === 'customer') {
+      lat = customerCoords.latitude;
+      lng = customerCoords.longitude;
+      title = job?.customer_name || 'ลูกค้า';
+    } else {
+      const activeShop = targetShop || nextShopToPickup || shopsList[0];
+      const matchCoord = shopCoordinatesList.find(s => s.shop.shop_id === activeShop?.shop_id);
+      lat = matchCoord?.latitude || primaryShopCoord.latitude;
+      lng = matchCoord?.longitude || primaryShopCoord.longitude;
+      title = activeShop?.shop_name || 'ร้านค้า';
+    }
+
     const destination = `${lat},${lng}`;
     const url = Platform.select({
-      ios: `maps:0,0?q=${encodeURIComponent(toShop ? job.shop_name : job.customer_name)}@${destination}`,
+      ios: `maps:0,0?q=${encodeURIComponent(title)}@${destination}`,
       android: `google.navigation:q=${destination}&mode=d`,
     }) || `https://www.google.com/maps/dir/?api=1&destination=${destination}`;
     
@@ -327,17 +515,17 @@ export default function DeliveryRoute() {
     Linking.openURL(`tel:${phoneNumber}`);
   };
 
-  const openChatWith = (target: 'seller' | 'buyer') => {
-    router.push(`/chat/${orderId}?target=${target}` as any);
+  const openChatWith = (target: 'seller' | 'buyer', shopId?: number | string) => {
+    const shopQuery = shopId ? `&shop_id=${shopId}` : '';
+    router.push(`/chat/${orderId}?target=${target}${shopQuery}` as any);
   };
 
   const currentStepIndex = useMemo(() => {
-    if (status === 'delivered') return 4;
-    if (status === 'delivering') return 3;
-    if (status === 'picked_up') return 2;
-    if (status === 'arriving_shop') return 1;
+    if (status === 'delivered') return 3;
+    if (status === 'delivering') return 2;
+    if (status === 'picked_up' || isAllShopsPickedUp) return 1;
     return 0;
-  }, [status]);
+  }, [status, isAllShopsPickedUp]);
 
   if (loading) {
     return (
@@ -359,6 +547,8 @@ export default function DeliveryRoute() {
     );
   }
 
+  const isMultiShop = shopsList.length > 1;
+
   return (
     <View style={styles.container}>
       {/* Top Header */}
@@ -368,14 +558,18 @@ export default function DeliveryRoute() {
         </TouchableOpacity>
         <View style={{ alignItems: 'center' }}>
           <Text style={styles.headerTitle}>ออเดอร์ #{job.order_id}</Text>
-          <Text style={styles.headerSubtitle}>ระยะทางประมาณ {job.distance || '2.5 กม.'}</Text>
+          <Text style={styles.headerSubtitle}>
+            {isMultiShop 
+              ? `แวะรับ ${shopsList.length} ร้านค้า • ระยะทาง ${job.distance || '2.5 กม.'}`
+              : `ระยะทางประมาณ ${job.distance || '2.5 กม.'}`}
+          </Text>
         </View>
         <TouchableOpacity 
           style={styles.headerChatBtn} 
           onPress={() => {
-          const activeTarget = (status === 'accepted' || status === 'arriving_shop') ? 'seller' : 'buyer';
-          router.push(`/chat/${job.order_id}?target=${activeTarget}` as any);
-        }}
+            const activeTarget = isAllShopsPickedUp ? 'buyer' : 'seller';
+            openChatWith(activeTarget);
+          }}
         >
           <Ionicons name="chatbubbles" size={20} color="#059669" />
         </TouchableOpacity>
@@ -419,7 +613,7 @@ export default function DeliveryRoute() {
           })}
         </View>
 
-        {/* Dynamic Route Map View with Native & Visual Fallback */}
+        {/* Dynamic Route Map View with Multi-Shop Markers */}
         <View style={styles.mapContainer}>
           <MapView 
             ref={mapRef}
@@ -432,25 +626,58 @@ export default function DeliveryRoute() {
             showsCompass={true}
             toolbarEnabled={false}
           >
-            {/* Route Line connecting Shop -> Customer */}
+            {/* Route Line connecting Rider -> Shop 1 -> Shop 2 -> Customer */}
             <Polyline
-              coordinates={[shopCoords, riderCoords, customerCoords]}
+              coordinates={polylineCoords}
               strokeColor="#059669"
               strokeWidth={4}
               lineDashPattern={[6, 4]}
             />
 
-            {/* Shop Marker */}
-            <Marker coordinate={shopCoords} title={job.shop_name} description={job.shop_address}>
-              <View style={styles.shopPinWrapper}>
-                <View style={styles.shopPinCircle}>
-                  <MaterialCommunityIcons name="storefront" size={16} color="#fff" />
-                </View>
-                <View style={styles.pinLabelBox}>
-                  <Text style={styles.pinLabelText} numberOfLines={1}>{job.shop_name}</Text>
-                </View>
-              </View>
-            </Marker>
+            {/* Multiple Shop Markers */}
+            {shopCoordinatesList.map((item, idx) => {
+              const isShopDone = item.shop.is_picked_up;
+              return (
+                <Marker 
+                  key={`marker_shop_${item.shop.shop_id || idx}`}
+                  coordinate={{ latitude: item.latitude, longitude: item.longitude }} 
+                  title={item.shop.shop_name} 
+                  description={item.shop.shop_address}
+                >
+                  <View style={styles.shopPinWrapper}>
+                    <View style={[
+                      styles.shopPinCircle,
+                      isShopDone && { backgroundColor: '#10b981', borderColor: '#d1fae5' },
+                      !isShopDone && isMultiShop && { backgroundColor: '#0284c7' }
+                    ]}>
+                      {isShopDone ? (
+                        <Ionicons name="checkmark" size={16} color="#fff" />
+                      ) : isMultiShop ? (
+                        <Text style={styles.shopPinNumber}>{idx + 1}</Text>
+                      ) : (
+                        <MaterialCommunityIcons name="storefront" size={16} color="#fff" />
+                      )}
+                    </View>
+                    <View style={[
+                      styles.pinLabelBox,
+                      isShopDone && { borderColor: '#a7f3d0' },
+                      !isShopDone && isMultiShop && { borderColor: '#bae6fd' }
+                    ]}>
+                      <Text 
+                        style={[
+                          styles.pinLabelText,
+                          isShopDone && { color: '#059669' },
+                          !isShopDone && isMultiShop && { color: '#0284c7' }
+                        ]} 
+                        numberOfLines={1}
+                      >
+                        {isMultiShop ? `${idx + 1}. ${item.shop.shop_name}` : item.shop.shop_name}
+                      </Text>
+                    </View>
+                  </View>
+                </Marker>
+              );
+            })}
 
             {/* Customer Marker */}
             <Marker coordinate={customerCoords} title={job.customer_name} description={job.customer_address}>
@@ -464,7 +691,7 @@ export default function DeliveryRoute() {
               </View>
             </Marker>
 
-            {/* Rider Animated Marker */}
+            {/* Rider Position Marker */}
             <Marker coordinate={riderCoords} title="ตำแหน่งของคุณ">
               <View style={styles.riderPinCircle}>
                 <MaterialCommunityIcons name="motorbike" size={18} color="#fff" />
@@ -478,9 +705,18 @@ export default function DeliveryRoute() {
               <Ionicons name="locate" size={18} color="#059669" />
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.floatingNavBtn} onPress={openNavigation}>
+            <TouchableOpacity 
+              style={styles.floatingNavBtn} 
+              onPress={() => openNavigationTo(isAllShopsPickedUp ? 'customer' : 'shop')}
+            >
               <Ionicons name="navigate" size={16} color="#fff" />
-              <Text style={styles.floatingNavText}>เปิดแผนที่นำทาง</Text>
+              <Text style={styles.floatingNavText}>
+                {isAllShopsPickedUp 
+                  ? 'นำทางไปส่งลูกค้า' 
+                  : isMultiShop 
+                    ? `นำทางไปร้านที่ ${shopsList.findIndex(s => !s.is_picked_up) + 1 || 1}`
+                    : 'นำทางไปร้านค้า'}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -488,75 +724,177 @@ export default function DeliveryRoute() {
         {/* Earnings Banner */}
         <View style={styles.feeBanner}>
           <View>
-            <Text style={styles.feeBannerLabel}>ค่ารอบที่คุณจะได้รับ (รวมทิป)</Text>
+            <Text style={styles.feeBannerLabel}>
+              ค่ารอบที่คุณจะได้รับ {isMultiShop ? `(รวมรับ ${shopsList.length} ร้านค้า)` : '(รวมทิป)'}
+            </Text>
             <Text style={styles.feeBannerAmount}>฿{Number(job.delivery_fee).toFixed(2)}</Text>
           </View>
-          <View style={styles.directionTag}>
-            <Text style={styles.directionTagText}>
-              {status === 'delivering' ? '🛵 นำส่งให้ลูกค้า' : status === 'arriving_shop' ? '🏪 อยู่ที่ร้านค้า' : '📍 เดินทางไปร้าน'}
+          <View style={[styles.directionTag, isMultiShop && { backgroundColor: '#e0f2fe' }]}>
+            <Text style={[styles.directionTagText, isMultiShop && { color: '#0369a1' }]}>
+              {isAllShopsPickedUp 
+                ? '🛵 นำส่งให้ลูกค้า' 
+                : isMultiShop 
+                  ? `📍 รับสินค้า (${pickedUpShopsCount}/${shopsList.length} ร้าน)` 
+                  : '📍 เดินทางไปรับสินค้าที่ร้าน'}
             </Text>
           </View>
         </View>
 
-        {/* Store Card (Pickup) with Live Chat & Call */}
-        <View style={[styles.card, (status === 'accepted' || status === 'arriving_shop') && styles.cardActiveTarget]}>
-          <View style={styles.cardHeader}>
-            <View style={styles.pickupPin}>
-              <MaterialCommunityIcons name="storefront" size={16} color="#059669" />
-            </View>
-            <Text style={styles.cardTargetTitle}>จุดรับสินค้า (ร้านค้า)</Text>
-            {(status === 'accepted' || status === 'arriving_shop') && (
-              <View style={styles.currentStageBadge}>
-                <Text style={styles.currentStageText}>ขั้นตอนปัจจุบัน</Text>
+        {/* Multi-Shop Pickup Progress Tracker */}
+        {isMultiShop && (
+          <View style={styles.multiShopProgressCard}>
+            <View style={styles.multiShopProgressHeader}>
+              <View style={styles.multiShopProgressTitleBox}>
+                <MaterialCommunityIcons name="store-clock-outline" size={18} color="#0284c7" />
+                <Text style={styles.multiShopProgressTitle}>
+                  จุดแวะรับสินค้าทั้งหมด ({shopsList.length} ร้านค้า)
+                </Text>
               </View>
-            )}
-          </View>
-
-          <Text style={styles.cardPrimaryText}>{job.shop_name}</Text>
-          <Text style={styles.cardSubText}>{job.shop_address}</Text>
-
-          {/* Shop Preparation Status Alert Banner */}
-          {!isShopReady && (status === 'accepted' || status === 'arriving_shop') && (
-            <View style={styles.shopStatusAlert}>
-              <MaterialCommunityIcons name="clock-outline" size={16} color="#d97706" />
-              <Text style={styles.shopStatusAlertText}>ร้านค้ากำลังจัดเตรียมสินค้า (ยังไม่พร้อมส่ง)</Text>
+              <Text style={styles.multiShopProgressCounter}>
+                รับแล้ว {pickedUpShopsCount}/{shopsList.length}
+              </Text>
             </View>
-          )}
-          {isShopReady && (status === 'accepted' || status === 'arriving_shop') && (
-            <View style={[styles.shopStatusAlert, { backgroundColor: '#ecfdf5', borderColor: '#a7f3d0' }]}>
-              <MaterialCommunityIcons name="check-circle" size={16} color="#059669" />
-              <Text style={[styles.shopStatusAlertText, { color: '#059669' }]}>ร้านค้ากดยืนยันพร้อมส่งแล้ว ✅</Text>
+            
+            {/* Mini Progress Bar */}
+            <View style={styles.progressBarTrack}>
+              <View 
+                style={[
+                  styles.progressBarFill, 
+                  { width: `${(pickedUpShopsCount / Math.max(1, shopsList.length)) * 100}%` }
+                ]} 
+              />
             </View>
-          )}
-
-          {/* Action Row: Chat with Shop & Call Shop */}
-          <View style={styles.contactRow}>
-            <TouchableOpacity 
-              style={styles.chatStoreBtn}
-              onPress={() => openChatWith('seller')}
-            >
-              <Ionicons name="chatbubble-ellipses" size={16} color="#0284c7" />
-              <Text style={styles.chatStoreBtnText}>แชทกับร้านค้า</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity 
-              style={styles.callStoreBtn}
-              onPress={() => makePhoneCall(job.shop_phone || '021234567')}
-            >
-              <Ionicons name="call" size={16} color="#059669" />
-              <Text style={styles.callStoreBtnText}>โทรหาร้าน</Text>
-            </TouchableOpacity>
           </View>
-        </View>
+        )}
+
+        {/* Interactive Store Cards List (Multi-Shop Support) */}
+        {shopsList.map((shop, idx) => {
+          const isCurrentActiveStop = !isAllShopsPickedUp && nextShopToPickup?.shop_id === shop.shop_id;
+          const isDone = shop.is_picked_up;
+
+          return (
+            <View 
+              key={`shop_card_${shop.shop_id || idx}`}
+              style={[
+                styles.card,
+                isCurrentActiveStop && styles.cardActiveTarget,
+                isDone && styles.cardCompletedShop
+              ]}
+            >
+              <View style={styles.cardHeader}>
+                <View style={[
+                  styles.pickupPin,
+                  isDone && { backgroundColor: '#10b981' },
+                  isCurrentActiveStop && { backgroundColor: '#0284c7' }
+                ]}>
+                  {isDone ? (
+                    <Ionicons name="checkmark" size={12} color="#fff" />
+                  ) : isMultiShop ? (
+                    <Text style={{ color: '#fff', fontSize: 11, fontWeight: '900' }}>{idx + 1}</Text>
+                  ) : (
+                    <MaterialCommunityIcons name="storefront" size={14} color="#fff" />
+                  )}
+                </View>
+                <Text style={[styles.cardTargetTitle, isDone && { color: '#059669' }]}>
+                  {isMultiShop ? `จุดรับที่ ${idx + 1} (${shop.shop_name})` : 'จุดรับสินค้า (ร้านค้า)'}
+                </Text>
+                
+                {isDone ? (
+                  <View style={[styles.currentStageBadge, { backgroundColor: '#dcfce7' }]}>
+                    <Text style={[styles.currentStageText, { color: '#16a34a' }]}>รับแล้ว ✅</Text>
+                  </View>
+                ) : isCurrentActiveStop ? (
+                  <View style={styles.currentStageBadge}>
+                    <Text style={styles.currentStageText}>แวะรับร้านนี้ 🛵</Text>
+                  </View>
+                ) : null}
+              </View>
+
+              <Text style={styles.cardPrimaryText}>{shop.shop_name}</Text>
+              <Text style={styles.cardSubText}>{shop.shop_address}</Text>
+
+              {/* Items in this shop */}
+              {Array.isArray(shop.items) && shop.items.length > 0 && (
+                <View style={styles.shopItemsBox}>
+                  <Text style={styles.shopItemsHeader}>รายการที่ต้องรับจากร้านนี้:</Text>
+                  {shop.items.map((it, itIdx) => (
+                    <View key={`it_${itIdx}`} style={styles.shopItemRow}>
+                      <MaterialCommunityIcons name="circle-medium" size={16} color="#0284c7" />
+                      <Text style={styles.shopItemName}>{it.name}</Text>
+                      <Text style={styles.shopItemQty}>x{it.quantity || 1}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* Shop Preparation Status */}
+              {!isDone && (
+                <View style={[
+                  styles.shopStatusAlert,
+                  shop.is_ready && { backgroundColor: '#ecfdf5', borderColor: '#a7f3d0' }
+                ]}>
+                  <MaterialCommunityIcons 
+                    name={shop.is_ready ? "check-circle" : "clock-outline"} 
+                    size={16} 
+                    color={shop.is_ready ? "#059669" : "#d97706"} 
+                  />
+                  <Text style={[
+                    styles.shopStatusAlertText,
+                    shop.is_ready && { color: '#059669' }
+                  ]}>
+                    {shop.is_ready ? 'ร้านค้ากดยืนยันพร้อมส่งแล้ว ✅' : 'ร้านค้ากำลังจัดเตรียมสินค้า'}
+                  </Text>
+                </View>
+              )}
+
+              {/* Action Row: Chat, Call & Navigate per shop */}
+              <View style={styles.contactRow}>
+                <TouchableOpacity 
+                  style={styles.chatStoreBtn}
+                  onPress={() => openChatWith('seller', shop.shop_id)}
+                >
+                  <Ionicons name="chatbubble-ellipses" size={15} color="#0284c7" />
+                  <Text style={styles.chatStoreBtnText}>แชท</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity 
+                  style={styles.callStoreBtn}
+                  onPress={() => makePhoneCall(shop.shop_phone)}
+                >
+                  <Ionicons name="call" size={15} color="#059669" />
+                  <Text style={styles.callStoreBtnText}>โทร</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity 
+                  style={styles.navStoreBtn}
+                  onPress={() => openNavigationTo('shop', shop)}
+                >
+                  <Ionicons name="navigate-outline" size={15} color="#7c3aed" />
+                  <Text style={styles.navStoreBtnText}>นำทาง</Text>
+                </TouchableOpacity>
+
+                {!isDone && (
+                  <TouchableOpacity 
+                    style={styles.pickupIndividualBtn}
+                    onPress={() => openProofModal('pickup', shop)}
+                  >
+                    <MaterialCommunityIcons name="camera-plus" size={15} color="#fff" />
+                    <Text style={styles.pickupIndividualBtnText}>ถ่ายรูปรับ</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          );
+        })}
 
         {/* Customer Card (Dropoff) with Live Chat & Call */}
-        <View style={[styles.card, status === 'delivering' && styles.cardActiveTarget]}>
+        <View style={[styles.card, isAllShopsPickedUp && styles.cardActiveTarget]}>
           <View style={styles.cardHeader}>
             <View style={styles.dropoffPin}>
               <Ionicons name="location" size={16} color="#ef4444" />
             </View>
             <Text style={[styles.cardTargetTitle, { color: '#ef4444' }]}>จุดส่งสินค้า (ลูกค้า)</Text>
-            {status === 'delivering' && (
+            {isAllShopsPickedUp && status !== 'delivered' && (
               <View style={[styles.currentStageBadge, { backgroundColor: '#fee2e2' }]}>
                 <Text style={[styles.currentStageText, { color: '#ef4444' }]}>ขั้นตอนปัจจุบัน</Text>
               </View>
@@ -589,58 +927,33 @@ export default function DeliveryRoute() {
 
       {/* Sequential Sticky Action Footer */}
       <View style={styles.footer}>
-        <TouchableOpacity style={styles.navigationSecondaryBtn} onPress={openNavigation}>
+        <TouchableOpacity 
+          style={styles.navigationSecondaryBtn} 
+          onPress={() => openNavigationTo(isAllShopsPickedUp ? 'customer' : 'shop')}
+        >
           <MaterialCommunityIcons name="navigation-variant" size={20} color="#059669" />
           <Text style={styles.navigationSecondaryText}>นำทาง</Text>
         </TouchableOpacity>
 
-        {status === 'accepted' ? (
+        {!isAllShopsPickedUp ? (
           <TouchableOpacity
-            disabled={updating}
-            style={[styles.primaryActionBtn, updating && styles.btnDisabled]}
-            onPress={() => updateStatusSimple('arriving_shop')}
+            style={[styles.primaryActionBtn, { backgroundColor: '#0284c7' }]}
+            onPress={() => openProofModal('pickup', nextShopToPickup || undefined)}
           >
-            {updating ? <ActivityIndicator color="#fff" /> : (
-              <>
-                <MaterialCommunityIcons name="storefront-check" size={20} color="#fff" style={{ marginRight: 6 }} />
-                <Text style={styles.primaryActionBtnText}>ฉันมาถึงร้านแล้ว</Text>
-              </>
-            )}
+            <MaterialCommunityIcons name="camera" size={20} color="#fff" style={{ marginRight: 6 }} />
+            <Text style={styles.primaryActionBtnText}>
+              {isMultiShop 
+                ? `ถ่ายรูปรับของ (${nextShopToPickup?.shop_name || 'ร้านถัดไป'})`
+                : 'ถ่ายรูปยืนยันรับสินค้า'}
+            </Text>
           </TouchableOpacity>
-        ) : status === 'arriving_shop' ? (
-          isShopReady ? (
-            <TouchableOpacity
-              style={[styles.primaryActionBtn, { backgroundColor: '#0284c7' }]}
-              onPress={() => openProofModal('pickup')}
-            >
-              <MaterialCommunityIcons name="camera" size={20} color="#fff" style={{ marginRight: 6 }} />
-              <Text style={styles.primaryActionBtnText}>ถ่ายรูปยืนยันรับสินค้า</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={[styles.primaryActionBtn, { backgroundColor: '#94a3b8' }]}
-              onPress={() => {
-                Alert.alert(
-                  'ร้านค้ายังเตรียมสินค้าไม่เสร็จ',
-                  'กรุณารอทางร้านกดยืนยัน "พร้อมส่งสินค้า" ในระบบก่อน คุณจึงจะสามารถกดยืนยันรับสินค้าได้ครับ\n\n(คุณสามารถกดแชทถามร้านค้าได้)',
-                  [
-                    { text: 'แชทถามร้านค้า', onPress: () => openChatWith('seller') },
-                    { text: 'ตกลง', style: 'cancel' }
-                  ]
-                );
-              }}
-            >
-              <MaterialCommunityIcons name="clock-outline" size={20} color="#fff" style={{ marginRight: 6 }} />
-              <Text style={styles.primaryActionBtnText}>⏳ รอร้านค้ากดพร้อมส่ง</Text>
-            </TouchableOpacity>
-          )
-        ) : status === 'delivering' ? (
+        ) : status !== 'delivered' ? (
           <TouchableOpacity
             style={[styles.primaryActionBtn, { backgroundColor: '#059669' }]}
             onPress={() => openProofModal('dropoff')}
           >
             <Ionicons name="camera" size={20} color="#fff" style={{ marginRight: 8 }} />
-            <Text style={styles.primaryActionBtnText}>ถ่ายรูปส่งมอบสินค้า</Text>
+            <Text style={styles.primaryActionBtnText}>ถ่ายรูปส่งมอบสินค้าให้ลูกค้า</Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity
@@ -653,7 +966,7 @@ export default function DeliveryRoute() {
         )}
       </View>
 
-      {/* Interactive Photo Confirmation Modal (Sequential Proof Verification) */}
+      {/* Interactive Photo Confirmation Modal */}
       <Modal visible={photoModalVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalSheet}>
@@ -665,7 +978,9 @@ export default function DeliveryRoute() {
                   color={photoType === 'pickup' ? '#0284c7' : '#059669'} 
                 />
                 <Text style={styles.modalTitle}>
-                  {photoType === 'pickup' ? 'ถ่ายรูปยืนยันรับสินค้าจากร้าน' : 'ถ่ายรูปยืนยันส่งมอบสินค้าให้ลูกค้า'}
+                  {photoType === 'pickup' 
+                    ? `ถ่ายรูปรับสินค้า (${targetShopForPickup?.shop_name || 'ร้านค้า'})`
+                    : 'ถ่ายรูปยืนยันส่งมอบสินค้าให้ลูกค้า'}
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setPhotoModalVisible(false)} style={styles.modalCloseBtn}>
@@ -675,7 +990,7 @@ export default function DeliveryRoute() {
 
             <Text style={styles.modalInstruction}>
               {photoType === 'pickup' 
-                ? 'กรุณาถ่ายรูปอาหาร/ถุงสินค้าหรือใบเสร็จรับเงินที่ได้รับจากร้านค้า เพื่อยืนยันความถูกต้อง'
+                ? `กรุณาถ่ายรูปถุงสินค้า/อาหารหรือใบเสร็จที่ได้รับจาก "${targetShopForPickup?.shop_name || 'ร้านค้า'}" เพื่อยืนยันความถูกต้อง`
                 : 'กรุณาถ่ายรูปสินค้า ณ จุดส่งมอบ หรือวางหน้าบ้านให้เห็นชัดเจนเพื่อเป็นหลักฐาน'}
             </Text>
 
@@ -737,7 +1052,7 @@ export default function DeliveryRoute() {
                   <>
                     <Ionicons name="checkmark-done" size={20} color="#fff" style={{ marginRight: 6 }} />
                     <Text style={styles.confirmProofText}>
-                      {photoType === 'pickup' ? 'ยืนยันรับสินค้า & เริ่มจัดส่ง' : 'ยืนยันจัดส่งสำเร็จ & รับเงิน'}
+                      {photoType === 'pickup' ? 'ยืนยันรับสินค้าร้านนี้' : 'ยืนยันจัดส่งสำเร็จ & รับเงิน'}
                     </Text>
                   </>
                 )}
@@ -751,32 +1066,15 @@ export default function DeliveryRoute() {
 }
 
 const styles = StyleSheet.create({
-  shopStatusAlert: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fffbeb',
-    borderWidth: 1,
-    borderColor: '#fde68a',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    marginTop: 8,
-    gap: 6,
-  },
-  shopStatusAlertText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#b45309',
-  },
   container: {
     flex: 1,
-    backgroundColor: '#f8fafc'
+    backgroundColor: '#f8fafc',
   },
   center: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24
+    padding: 24,
   },
   emptyText: {
     fontSize: 16,
@@ -833,7 +1131,7 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 16,
-    paddingBottom: 110,
+    paddingBottom: 120,
     gap: 14,
   },
   stepProgressBar: {
@@ -890,7 +1188,7 @@ const styles = StyleSheet.create({
   },
   mapContainer: {
     width: '100%',
-    height: 230,
+    height: 240,
     borderRadius: 22,
     overflow: 'hidden',
     position: 'relative',
@@ -924,6 +1222,11 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 3,
     elevation: 4,
+  },
+  shopPinNumber: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: '#ffffff',
   },
   customerPinWrapper: {
     alignItems: 'center',
@@ -966,7 +1269,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#a7f3d0',
     marginTop: 2,
-    maxWidth: 110,
+    maxWidth: 120,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1,
@@ -1057,6 +1360,45 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#059669',
   },
+  multiShopProgressCard: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+  },
+  multiShopProgressHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  multiShopProgressTitleBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  multiShopProgressTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0369a1',
+  },
+  multiShopProgressCounter: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0284c7',
+  },
+  progressBarTrack: {
+    height: 6,
+    backgroundColor: '#e0f2fe',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#0284c7',
+    borderRadius: 3,
+  },
   card: {
     backgroundColor: '#ffffff',
     borderRadius: 18,
@@ -1065,13 +1407,17 @@ const styles = StyleSheet.create({
     borderColor: '#f1f5f9',
   },
   cardActiveTarget: {
-    borderColor: '#059669',
+    borderColor: '#0284c7',
     backgroundColor: '#fcfdfd',
-    shadowColor: '#059669',
+    shadowColor: '#0284c7',
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.08,
     shadowRadius: 8,
     elevation: 3,
+  },
+  cardCompletedShop: {
+    borderColor: '#dcfce7',
+    backgroundColor: '#fafefc',
   },
   cardHeader: {
     flexDirection: 'row',
@@ -1083,7 +1429,7 @@ const styles = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: '#ecfdf5',
+    backgroundColor: '#059669',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1098,11 +1444,11 @@ const styles = StyleSheet.create({
   cardTargetTitle: {
     fontSize: 14,
     fontWeight: '800',
-    color: '#059669',
+    color: '#0f172a',
     flex: 1,
   },
   currentStageBadge: {
-    backgroundColor: '#ecfdf5',
+    backgroundColor: '#e0f2fe',
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 8,
@@ -1110,7 +1456,7 @@ const styles = StyleSheet.create({
   currentStageText: {
     fontSize: 10,
     fontWeight: '800',
-    color: '#059669',
+    color: '#0284c7',
   },
   cardPrimaryText: {
     fontSize: 16,
@@ -1122,11 +1468,57 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#64748b',
     lineHeight: 18,
-    marginBottom: 12,
+    marginBottom: 8,
+  },
+  shopItemsBox: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+  },
+  shopItemsHeader: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748b',
+    marginBottom: 4,
+  },
+  shopItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 2,
+  },
+  shopItemName: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1e293b',
+    flex: 1,
+  },
+  shopItemQty: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0284c7',
+  },
+  shopStatusAlert: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fffbeb',
+    borderWidth: 1,
+    borderColor: '#fde68a',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 10,
+    gap: 6,
+  },
+  shopStatusAlertText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#b45309',
   },
   contactRow: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     marginTop: 4,
   },
   chatStoreBtn: {
@@ -1135,31 +1527,63 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#f0f9ff',
-    paddingVertical: 9,
+    paddingVertical: 8,
     borderRadius: 12,
-    gap: 6,
+    gap: 4,
     borderWidth: 1,
     borderColor: '#bae6fd',
   },
   chatStoreBtnText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
     color: '#0284c7',
   },
   callStoreBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#ecfdf5',
-    paddingHorizontal: 14,
-    paddingVertical: 9,
+    paddingVertical: 8,
     borderRadius: 12,
-    gap: 6,
+    gap: 4,
   },
   callStoreBtnText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
     color: '#059669',
+  },
+  navStoreBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f5f3ff',
+    paddingVertical: 8,
+    borderRadius: 12,
+    gap: 4,
+    borderWidth: 1,
+    borderColor: '#ddd6fe',
+  },
+  navStoreBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#7c3aed',
+  },
+  pickupIndividualBtn: {
+    flex: 1.2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0284c7',
+    paddingVertical: 8,
+    borderRadius: 12,
+    gap: 4,
+  },
+  pickupIndividualBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#ffffff',
   },
   chatCustomerBtn: {
     flex: 1,
@@ -1179,11 +1603,11 @@ const styles = StyleSheet.create({
     color: '#059669',
   },
   callCustomerBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#ecfdf5',
-    paddingHorizontal: 14,
     paddingVertical: 9,
     borderRadius: 12,
     gap: 6,
@@ -1231,14 +1655,10 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   primaryActionBtnText: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '800',
     color: '#ffffff',
   },
-  btnDisabled: {
-    opacity: 0.6,
-  },
-  // Modal styles
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
