@@ -91,35 +91,52 @@ export default function DeliveryRoute() {
 
   // Normalize shops from raw order data
   const parseShopsFromJob = (data: any): ShopStop[] => {
+    let proofsMap: any = {};
+    if (data.pickup_proofs) {
+      try {
+        proofsMap = typeof data.pickup_proofs === 'string' ? JSON.parse(data.pickup_proofs) : data.pickup_proofs;
+      } catch (e) {
+        proofsMap = {};
+      }
+    }
+
     if (Array.isArray(data.shops) && data.shops.length > 0) {
-      return data.shops.map((s: any, idx: number) => ({
-        shop_id: s.shop_id || `shop_${idx + 1}`,
-        shop_name: s.shop_name || `ร้านค้าที่ ${idx + 1}`,
-        shop_address: s.shop_address || data.shop_address || 'ที่อยู่ร้านค้า',
-        shop_phone: s.shop_phone || data.shop_phone || '021234567',
-        shop_lat: s.shop_lat || s.latitude || data.shop_lat,
-        shop_lng: s.shop_lng || s.longitude || data.shop_lng,
-        is_ready: s.is_ready ?? (data.order_status === 'ready' || data.order_status === 'delivering' || data.order_status === 'delivered'),
-        is_picked_up: s.is_picked_up ?? (data.delivery_status === 'delivering' || data.delivery_status === 'delivered'),
-        items: Array.isArray(s.items) ? s.items : [],
-      }));
+      const isMulti = data.shops.length > 1;
+      return data.shops.map((s: any, idx: number) => {
+        const sKey = String(s.shop_id || idx + 1);
+        const hasProof = !!(proofsMap[sKey]?.proof_image || s.proof_image);
+        return {
+          shop_id: s.shop_id || `shop_${idx + 1}`,
+          shop_name: s.shop_name || `ร้านค้าที่ ${idx + 1}`,
+          shop_address: s.shop_address || data.shop_address || 'ที่อยู่ร้านค้า',
+          shop_phone: s.shop_phone || data.shop_phone || '021234567',
+          shop_lat: s.shop_lat || s.latitude || data.shop_lat,
+          shop_lng: s.shop_lng || s.longitude || data.shop_lng,
+          is_ready: s.is_ready ?? (data.order_status === 'ready' || data.order_status === 'delivering' || data.order_status === 'delivered'),
+          is_picked_up: isMulti ? (s.is_picked_up ?? hasProof) : (s.is_picked_up ?? (data.delivery_status === 'delivering' || data.delivery_status === 'delivered' || hasProof)),
+          proof_image: s.proof_image || proofsMap[sKey]?.proof_image || null,
+          items: Array.isArray(s.items) ? s.items : [],
+        };
+      });
     }
 
     // Parse from items if items contain shop info
     if (Array.isArray(data.items) && data.items.length > 0) {
       const map: { [key: string]: ShopStop } = {};
       data.items.forEach((item: any, idx: number) => {
-        const sKey = String(item.shop_id || item.shop_name || data.shop_id || 'main_shop');
+        const sKey = String(item.shop_id || item.product_shop_id || data.shop_id || 'main_shop');
         if (!map[sKey]) {
+          const hasProof = !!proofsMap[sKey]?.proof_image;
           map[sKey] = {
-            shop_id: item.shop_id || data.shop_id || idx + 1,
+            shop_id: item.shop_id || item.product_shop_id || data.shop_id || idx + 1,
             shop_name: item.shop_name || data.shop_name || `ร้านค้าที่ ${Object.keys(map).length + 1}`,
             shop_address: item.shop_address || data.shop_address || 'ที่อยู่ร้านค้า',
             shop_phone: item.shop_phone || data.shop_phone || '021234567',
             shop_lat: item.shop_lat || item.latitude || data.shop_lat,
             shop_lng: item.shop_lng || item.longitude || data.shop_lng,
             is_ready: data.order_status === 'ready' || data.order_status === 'delivering' || data.order_status === 'delivered',
-            is_picked_up: data.delivery_status === 'delivering' || data.delivery_status === 'delivered',
+            is_picked_up: hasProof,
+            proof_image: proofsMap[sKey]?.proof_image || null,
             items: [],
           };
         }
@@ -130,10 +147,16 @@ export default function DeliveryRoute() {
         });
       });
       const res = Object.values(map);
-      if (res.length > 0) return res;
+      if (res.length > 0) {
+        if (res.length === 1 && !res[0].is_picked_up) {
+          res[0].is_picked_up = data.delivery_status === 'delivering' || data.delivery_status === 'delivered';
+        }
+        return res;
+      }
     }
 
     // Default fallback single shop
+    const singleProof = proofsMap[String(data.shop_id || 1)]?.proof_image || data.pickup_proof_image;
     return [
       {
         shop_id: data.shop_id || 1,
@@ -143,7 +166,8 @@ export default function DeliveryRoute() {
         shop_lat: data.shop_lat,
         shop_lng: data.shop_lng,
         is_ready: data.order_status === 'ready' || data.order_status === 'delivering' || data.order_status === 'delivered',
-        is_picked_up: data.delivery_status === 'delivering' || data.delivery_status === 'delivered',
+        is_picked_up: data.delivery_status === 'delivering' || data.delivery_status === 'delivered' || !!singleProof,
+        proof_image: singleProof || null,
         items: Array.isArray(data.items) ? data.items : [],
       }
     ];
@@ -168,18 +192,25 @@ export default function DeliveryRoute() {
 
       setJob(data);
       setShopsList(prev => {
-        // Keep local pickup checklist states if updated locally
-        if (prev.length === parsedShops.length && prev.length > 0) {
-          return parsedShops.map((ps, i) => ({
+        if (prev.length === 0) return parsedShops;
+        return parsedShops.map(ps => {
+          const prevMatch = prev.find(p => String(p.shop_id) === String(ps.shop_id));
+          return {
             ...ps,
-            is_picked_up: prev[i]?.is_picked_up || ps.is_picked_up,
-          }));
-        }
-        return parsedShops;
+            is_picked_up: prevMatch?.is_picked_up || ps.is_picked_up || false,
+            proof_image: prevMatch?.proof_image || ps.proof_image,
+          };
+        });
       });
 
-      if (data.delivery_status) {
-        setStatus(data.delivery_status);
+      // Strict status transition check: only switch to delivering when all shops are picked up!
+      const allPicked = parsedShops.length > 0 && parsedShops.every(s => s.is_picked_up);
+      if (data.delivery_status === 'delivered') {
+        setStatus('delivered');
+      } else if (allPicked) {
+        setStatus('delivering');
+      } else {
+        setStatus('accepted');
       }
     } catch (error: any) {
       // Robust Fallback: Try to fetch from active deliveries in rider history
@@ -444,12 +475,14 @@ export default function DeliveryRoute() {
             `คุณได้รับสินค้าครบทั้ง ${updatedShops.length} ร้านค้าเรียบร้อยแล้ว ตอนนี้กำลังมุ่งหน้าไปส่งให้ลูกค้าครับ`
           );
         } else {
+          setStatus('accepted');
+          setTargetShopForPickup(remainingShops[0] || null);
           Alert.alert(
             `รับของจาก "${currentTargetShop?.shop_name}" เรียบร้อย ✅`,
             `ยังเหลือสินค้าอีก ${remainingShops.length} ร้านค้า กรุณาเดินทางไปรับที่: ${remainingShops[0]?.shop_name}`
           );
         }
-        fetchJob();
+        await fetchJob();
       } else {
         // Dropoff complete
         const res = await api.post(`/rider/deliveries/${orderId}/complete`, {
