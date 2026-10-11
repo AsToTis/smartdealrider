@@ -277,12 +277,7 @@ export default function RiderReviewsScreen() {
     }
   };
 
-  // Handle Chat with Customer
-  const handleChatCustomer = (orderId: number) => {
-    if (orderId) {
-      router.push(`/chat/${orderId}` as any);
-    }
-  };
+
 
   // Header Component for FlatList
   const renderHeader = () => (
@@ -489,18 +484,6 @@ export default function RiderReviewsScreen() {
             </View>
           </TouchableOpacity>
         )}
-
-        {/* Action Button: Chat with customer */}
-        <View style={styles.cardActionRow}>
-          <TouchableOpacity
-            style={styles.chatButton}
-            activeOpacity={0.8}
-            onPress={() => handleChatCustomer(item.order_id)}
-          >
-            <Ionicons name="chatbubble-ellipses" size={15} color="#ffffff" />
-            <Text style={styles.chatButtonText}>ทักแชทลูกค้า</Text>
-          </TouchableOpacity>
-        </View>
       </View>
     );
   };
@@ -867,30 +850,6 @@ const styles = StyleSheet.create({
   },
   imageZoomBadgeText: {
     fontSize: 9,
-    fontWeight: '700',
-    color: '#ffffff',
-  },
-  cardActionRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginTop: 12,
-  },
-  chatButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#059669',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 20,
-    gap: 5,
-    shadowColor: '#059669',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  chatButtonText: {
-    fontSize: 12,
     fontWeight: '700',
     color: '#ffffff',
   },
