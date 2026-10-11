@@ -26,6 +26,9 @@ type DeliveryOrder = {
   status?: string;
   created_at?: string;
   completed_at?: string;
+  shops_count?: number;
+  shops?: any[];
+  items_count?: number;
 };
 
 const statusMeta: Record<string, { label: string; color: string; bg: string; icon: string }> = {
@@ -63,8 +66,10 @@ export default function MyDeliveriesScreen() {
           const distNum = parseFloat(d.distance) || 2.5;
           const calculatedFare = Math.round(baseFare + (distNum * perKm));
           const feeNum = parseFloat(d.delivery_fee) || 0;
+          const shopsCount = Array.isArray(d.shops) ? d.shops.length : (d.shops_count || 1);
           return {
             ...d,
+            shops_count: shopsCount,
             delivery_fee: feeNum > 0 ? feeNum : calculatedFare,
           };
         });
@@ -104,16 +109,28 @@ export default function MyDeliveriesScreen() {
     const orderId = item.order_id || item.id;
     const currentStatus = item.status || 'accepted';
     const meta = statusMeta[currentStatus] || statusMeta.accepted;
-    const storeTitle = item.restaurant_name || item.shop_name || 'ร้านค้าพาร์ทเนอร์';
+    const isMulti = (item.shops_count || 1) > 1;
+    const storeTitle = isMulti 
+      ? `แวะรับ ${item.shops_count} ร้านค้าพาร์ทเนอร์`
+      : (item.restaurant_name || item.shop_name || 'ร้านค้าพาร์ทเนอร์');
     const dropoffAddress = item.delivery_address || item.customer_address || '-';
 
     return (
       <View style={styles.activeOrderCard}>
         {/* Top Header with Order ID and Status Pill */}
         <View style={styles.orderCardHeader}>
-          <View style={styles.orderIdBadge}>
-            <MaterialCommunityIcons name="receipt" size={16} color="#059669" />
-            <Text style={styles.orderIdText}>ออเดอร์ #{orderId}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <View style={styles.orderIdBadge}>
+              <MaterialCommunityIcons name="receipt" size={16} color="#059669" />
+              <Text style={styles.orderIdText}>ออเดอร์ #{orderId}</Text>
+            </View>
+            {isMulti && (
+              <View style={{ backgroundColor: '#e0f2fe', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                <Text style={{ fontSize: 10, fontWeight: '800', color: '#0284c7' }}>
+                  {item.shops_count} ร้าน
+                </Text>
+              </View>
+            )}
           </View>
 
           <View style={[styles.statusBadge, { backgroundColor: meta.bg }]}>
@@ -124,8 +141,12 @@ export default function MyDeliveriesScreen() {
 
         {/* Store & Customer Info */}
         <View style={styles.storeRow}>
-          <View style={styles.storeIconWrap}>
-            <Ionicons name="restaurant" size={18} color="#059669" />
+          <View style={[styles.storeIconWrap, isMulti && { backgroundColor: '#e0f2fe' }]}>
+            <MaterialCommunityIcons 
+              name={isMulti ? "store-check" : "storefront"} 
+              size={18} 
+              color={isMulti ? "#0284c7" : "#059669"} 
+            />
           </View>
           <View style={{ flex: 1 }}>
             <Text style={styles.storeName}>{storeTitle}</Text>
@@ -155,7 +176,10 @@ export default function MyDeliveriesScreen() {
 
   const renderCompletedItem = ({ item }: { item: DeliveryOrder }) => {
     const orderId = item.order_id || item.id;
-    const storeTitle = item.restaurant_name || item.shop_name || 'ร้านค้าพาร์ทเนอร์';
+    const isMulti = (item.shops_count || 1) > 1;
+    const storeTitle = isMulti 
+      ? `แวะรับ ${item.shops_count} ร้านค้า`
+      : (item.restaurant_name || item.shop_name || 'ร้านค้าพาร์ทเนอร์');
     const dropoffAddress = item.delivery_address || item.customer_address || '-';
     const dateStr = item.completed_at 
       ? new Date(item.completed_at).toLocaleDateString('th-TH', {

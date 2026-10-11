@@ -11,22 +11,48 @@ import {
   Animated, 
   Easing,
   Platform,
-  RefreshControl
+  RefreshControl,
+  Modal
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
 import { useRouter, useFocusEffect } from 'expo-router';
 import api from '../../utils/api';
 import { useAuth } from '../../context/AuthContext';
 
+interface ShopItem {
+  name: string;
+  quantity: number;
+  price?: number;
+}
+
+interface ShopStop {
+  shop_id?: number;
+  shop_name: string;
+  shop_address: string;
+  shop_phone?: string;
+  items?: ShopItem[];
+  items_count?: number;
+  latitude?: number | string;
+  longitude?: number | string;
+  is_ready?: boolean;
+}
+
 interface Job {
   order_id: number;
   shop_name: string;
   shop_address: string;
+  shop_phone?: string;
   customer_address: string;
   customer_name?: string;
+  customer_phone?: string;
   delivery_fee: string | number;
   distance?: string;
   order_status?: string;
+  shops?: ShopStop[];
+  items?: any[];
+  shops_count?: number;
+  is_multi_shop?: boolean;
+  note_for_rider?: string;
 }
 
 export default function RiderHomeScreen() {
@@ -35,10 +61,11 @@ export default function RiderHomeScreen() {
   const [isOnline, setIsOnline] = useState(true);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [activeJob, setActiveJob] = useState<any | null>(null);
-  const [wallet, setWallet] = useState({ todayIncome: 0, todayJobs: 0 });
+  const [wallet, setWallet] = useState({ todayIncome: 0, todayJobs: 0, rating: 0 });
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [acceptingId, setAcceptingId] = useState<number | null>(null);
+  const [selectedPreviewJob, setSelectedPreviewJob] = useState<Job | null>(null);
   const [adminFare, setAdminFare] = useState({ baseFare: 35, perKm: 8, riderPercent: 100 });
 
   const fetchAdminFare = async () => {
@@ -57,7 +84,6 @@ export default function RiderHomeScreen() {
     } catch (e) {}
   };
 
-  
   const prevJobsCountRef = useRef(0);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const radarAnim = useRef(new Animated.Value(0)).current;
@@ -94,6 +120,52 @@ export default function RiderHomeScreen() {
     }
   }, [isOnline]);
 
+  const normalizeShops = (rawJob: any): ShopStop[] => {
+    if (Array.isArray(rawJob.shops) && rawJob.shops.length > 0) {
+      return rawJob.shops;
+    }
+    if (Array.isArray(rawJob.pickup_shops) && rawJob.pickup_shops.length > 0) {
+      return rawJob.pickup_shops;
+    }
+    // If order has items from multiple shops
+    if (Array.isArray(rawJob.items) && rawJob.items.length > 0) {
+      const shopMap: { [key: string]: ShopStop } = {};
+      rawJob.items.forEach((item: any) => {
+        const key = item.shop_id || item.shop_name || rawJob.shop_name || 'shop_1';
+        if (!shopMap[key]) {
+          shopMap[key] = {
+            shop_id: item.shop_id,
+            shop_name: item.shop_name || rawJob.shop_name || 'ร้านค้า',
+            shop_address: item.shop_address || rawJob.shop_address || 'ที่อยู่ร้านค้า',
+            shop_phone: item.shop_phone || rawJob.shop_phone,
+            latitude: item.shop_lat || item.latitude,
+            longitude: item.shop_lng || item.longitude,
+            items: [],
+          };
+        }
+        shopMap[key].items!.push({
+          name: item.product_name || item.name || 'สินค้า',
+          quantity: item.quantity || 1,
+          price: item.price,
+        });
+      });
+      const shopsList = Object.values(shopMap);
+      if (shopsList.length > 0) return shopsList;
+    }
+    // Single shop fallback
+    return [
+      {
+        shop_id: rawJob.shop_id,
+        shop_name: rawJob.shop_name || 'ร้านค้า',
+        shop_address: rawJob.shop_address || 'ที่อยู่ร้านค้า',
+        shop_phone: rawJob.shop_phone,
+        latitude: rawJob.shop_lat || rawJob.latitude,
+        longitude: rawJob.shop_lng || rawJob.longitude,
+        items: Array.isArray(rawJob.items) ? rawJob.items : [],
+      },
+    ];
+  };
+
   const fetchJobs = async () => {
     if (!isOnline) {
       setJobs([]);
@@ -103,15 +175,19 @@ export default function RiderHomeScreen() {
       const response = await api.get('/rider/jobs');
       if (response.data?.success) {
         const rawJobs = response.data.data || response.data.jobs || [];
-        // โครงสร้างค่าจัดส่งตาม System Control Panel (เริ่มต้น ฿35 + ฿8/กม. สำหรับ 2.5 กม. = ฿55.00)
         const baseFare = adminFare.baseFare;
         const perKm = adminFare.perKm;
         const newJobs = rawJobs.map((j: any) => {
+          const parsedShops = normalizeShops(j);
           const distNum = parseFloat(j.distance) || 2.5;
-          const calculatedFare = Math.round(baseFare + (distNum * perKm));
+          // Multi-pickup fee bonus if multiple shops
+          const extraStopFee = parsedShops.length > 1 ? (parsedShops.length - 1) * 15 : 0;
+          const calculatedFare = Math.round(baseFare + (distNum * perKm) + extraStopFee);
           const feeNum = parseFloat(j.delivery_fee) || 0;
           return {
             ...j,
+            shops: parsedShops,
+            shops_count: parsedShops.length,
             distance: j.distance || `${distNum} กม.`,
             delivery_fee: feeNum > 0 ? feeNum : calculatedFare,
           };
@@ -132,11 +208,17 @@ export default function RiderHomeScreen() {
     try {
       const riderId = rider?.id || (rider as any)?.rider_id;
       if (!riderId) return;
-      const res = await api.get(`/rider/wallet?rider_id=${riderId}`);
-      if (res.data?.success) {
+      
+      const [walletRes, profileRes] = await Promise.all([
+        api.get(`/rider/wallet?rider_id=${riderId}`),
+        api.get(`/admin/riders/${riderId}`).catch(() => null)
+      ]);
+      
+      if (walletRes.data?.success) {
         setWallet({
-          todayIncome: Number(res.data.todayIncome) || 0,
-          todayJobs: Number(res.data.todayJobs) || 0,
+          todayIncome: Number(walletRes.data.todayIncome) || 0,
+          todayJobs: Number(walletRes.data.todayJobs) || 0,
+          rating: Number(profileRes?.data?.rider?.rating) || Number(walletRes.data.rating) || 0,
         });
       }
     } catch (error) {
@@ -308,15 +390,19 @@ export default function RiderHomeScreen() {
 
           <View style={styles.metricDivider} />
 
-          <View style={styles.metricCard}>
+          <TouchableOpacity 
+            style={styles.metricCard}
+            activeOpacity={0.7}
+            onPress={() => router.push('/(tabs)/reviews' as any)}
+          >
             <View style={[styles.metricIconWrap, { backgroundColor: '#fffbeb' }]}>
               <Ionicons name="star" size={18} color="#f59e0b" />
             </View>
             <View>
               <Text style={styles.metricLabel}>คะแนน</Text>
-              <Text style={styles.metricValue}>5.0 <Text style={styles.metricUnit}>⭐</Text></Text>
+              <Text style={styles.metricValue}>{(wallet.rating > 0 || rider?.rating > 0) ? Number(wallet.rating || rider?.rating).toFixed(1) : 'ใหม่'} <Text style={styles.metricUnit}>⭐</Text></Text>
             </View>
-          </View>
+          </TouchableOpacity>
         </View>
 
         {/* Active Delivery Banner (If rider has an ongoing task) */}
@@ -402,83 +488,321 @@ export default function RiderHomeScreen() {
           </View>
         ) : (
           <View style={styles.jobsList}>
-            {jobs.map((job) => (
-              <View key={job.order_id} style={styles.jobCard}>
-                {/* Store Header & Fee */}
-                <View style={styles.jobCardHeader}>
-                  <View style={styles.shopMeta}>
-                    <View style={styles.shopIconBg}>
-                      <MaterialCommunityIcons name="storefront-outline" size={22} color="#059669" />
+            {jobs.map((job) => {
+              const shopList = job.shops && job.shops.length > 0 ? job.shops : [
+                { shop_name: job.shop_name, shop_address: job.shop_address, items: [] }
+              ];
+              const isMultiShop = shopList.length > 1;
+
+              return (
+                <View key={job.order_id} style={[styles.jobCard, isMultiShop && styles.multiShopCard]}>
+                  {/* Multi-Shop Banner Tag */}
+                  {isMultiShop && (
+                    <View style={styles.multiShopBanner}>
+                      <MaterialCommunityIcons name="store-clock-outline" size={14} color="#0284c7" />
+                      <Text style={styles.multiShopBannerText}>
+                        รับของ {shopList.length} ร้านค้า (ออเดอร์รวม)
+                      </Text>
                     </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.shopName} numberOfLines={1}>{job.shop_name}</Text>
-                      <View style={styles.orderIdTag}>
-                        <Text style={styles.orderIdText}>ออเดอร์ #{job.order_id}</Text>
+                  )}
+
+                  {/* Clickable Card Body to View Details */}
+                  <TouchableOpacity 
+                    activeOpacity={0.88}
+                    onPress={() => setSelectedPreviewJob(job)}
+                  >
+                    {/* Store Header & Fee */}
+                    <View style={styles.jobCardHeader}>
+                      <View style={styles.shopMeta}>
+                        <View style={[styles.shopIconBg, isMultiShop && { backgroundColor: '#e0f2fe' }]}>
+                          <MaterialCommunityIcons 
+                            name={isMultiShop ? "store-check" : "storefront-outline"} 
+                            size={22} 
+                            color={isMultiShop ? "#0284c7" : "#059669"} 
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.shopName} numberOfLines={1}>
+                            {isMultiShop ? `${shopList.length} ร้านค้าพาร์ทเนอร์` : job.shop_name}
+                          </Text>
+                          <View style={styles.orderIdTag}>
+                            <Text style={styles.orderIdText}>ออเดอร์ #{job.order_id}</Text>
+                          </View>
+                        </View>
+                      </View>
+
+                      <View style={styles.feeBox}>
+                        <Text style={styles.feeAmount}>฿{Number(job.delivery_fee).toFixed(2)}</Text>
+                        <Text style={styles.feeLabel}>ค่ารอบรวมทิป</Text>
+                      </View>
+                    </View>
+
+                  {/* Route Visualizer (Multiple Pickups -> Dropoff) */}
+                  <View style={styles.routeBox}>
+                    {/* Multi Shop Stops List */}
+                    {shopList.map((shop, sIdx) => {
+                      const itemCount = shop.items?.reduce((sum, item) => sum + (item.quantity || 1), 0) || shop.items?.length || 0;
+                      return (
+                        <React.Fragment key={`shop_${sIdx}`}>
+                          <View style={styles.routeStop}>
+                            <View style={styles.pickupPinBox}>
+                              <View style={[styles.pickupPin, isMultiShop && { backgroundColor: '#0284c7' }]}>
+                                {isMultiShop && (
+                                  <Text style={styles.stopNumberText}>{sIdx + 1}</Text>
+                                )}
+                              </View>
+                            </View>
+                            <View style={styles.stopInfo}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                <Text style={[styles.stopType, isMultiShop && { color: '#0284c7' }]}>
+                                  {isMultiShop ? `จุดรับที่ ${sIdx + 1} (${shop.shop_name})` : 'จุดรับ (ร้านค้า)'}
+                                </Text>
+                                {itemCount > 0 && (
+                                  <View style={styles.itemsCountBadge}>
+                                    <Text style={styles.itemsCountText}>{itemCount} ชิ้น</Text>
+                                  </View>
+                                )}
+                              </View>
+                              <Text style={styles.stopAddress} numberOfLines={1}>{shop.shop_address || job.shop_address}</Text>
+                            </View>
+                          </View>
+
+                          {/* Connector line between stops */}
+                          {sIdx < shopList.length - 1 && (
+                            <View style={styles.routeConnector}>
+                              <View style={[styles.dashLine, { backgroundColor: '#93c5fd' }]} />
+                              <View style={[styles.distanceChip, { backgroundColor: '#eff6ff', borderColor: '#bfdbfe' }]}>
+                                <MaterialCommunityIcons name="arrow-down" size={12} color="#0284c7" />
+                                <Text style={[styles.distanceText, { color: '#0284c7' }]}>แวะรับร้านถัดไป</Text>
+                              </View>
+                            </View>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+
+                    {/* Final Connecting Line to Customer */}
+                    <View style={styles.routeConnector}>
+                      <View style={styles.dashLine} />
+                      <View style={styles.distanceChip}>
+                        <MaterialCommunityIcons name="map-marker-distance" size={13} color="#059669" />
+                        <Text style={styles.distanceText}>{job.distance || '2.5 กม.'}</Text>
+                      </View>
+                    </View>
+
+                    {/* Customer Dropoff */}
+                    <View style={styles.routeStop}>
+                      <View style={styles.dropoffPinBox}>
+                        <Ionicons name="location" size={16} color="#ef4444" />
+                      </View>
+                      <View style={styles.stopInfo}>
+                        <Text style={styles.stopType}>จุดส่ง (ลูกค้า)</Text>
+                        <Text style={styles.stopAddress} numberOfLines={1}>{job.customer_address}</Text>
                       </View>
                     </View>
                   </View>
 
-                  <View style={styles.feeBox}>
-                    <Text style={styles.feeAmount}>฿{Number(job.delivery_fee).toFixed(2)}</Text>
-                    <Text style={styles.feeLabel}>ค่ารอบรวมทิป</Text>
+                  <View style={styles.cardTapHintBar}>
+                    <Ionicons name="information-circle-outline" size={14} color="#64748b" />
+                    <Text style={styles.cardTapHintText}>แตะที่การ์ดเพื่อดูรายการสินค้าและที่อยู่เต็ม</Text>
                   </View>
-                </View>
-
-                {/* Route Visualizer (Pickup -> Dropoff) */}
-                <View style={styles.routeBox}>
-                  {/* Pickup */}
-                  <View style={styles.routeStop}>
-                    <View style={styles.pickupPinBox}>
-                      <View style={styles.pickupPin} />
-                    </View>
-                    <View style={styles.stopInfo}>
-                      <Text style={styles.stopType}>จุดรับ (ร้านค้า)</Text>
-                      <Text style={styles.stopAddress} numberOfLines={1}>{job.shop_address}</Text>
-                    </View>
-                  </View>
-
-                  {/* Connecting Line */}
-                  <View style={styles.routeConnector}>
-                    <View style={styles.dashLine} />
-                    <View style={styles.distanceChip}>
-                      <MaterialCommunityIcons name="map-marker-distance" size={13} color="#059669" />
-                      <Text style={styles.distanceText}>{job.distance || '2.5 กม.'}</Text>
-                    </View>
-                  </View>
-
-                  {/* Dropoff */}
-                  <View style={styles.routeStop}>
-                    <View style={styles.dropoffPinBox}>
-                      <Ionicons name="location" size={16} color="#ef4444" />
-                    </View>
-                    <View style={styles.stopInfo}>
-                      <Text style={styles.stopType}>จุดส่ง (ลูกค้า)</Text>
-                      <Text style={styles.stopAddress} numberOfLines={1}>{job.customer_address}</Text>
-                    </View>
-                  </View>
-                </View>
-
-                {/* Action CTA Button */}
-                <TouchableOpacity
-                  activeOpacity={0.85}
-                  disabled={acceptingId === job.order_id}
-                  style={[styles.acceptBtn, acceptingId === job.order_id && styles.btnDisabled]}
-                  onPress={() => acceptJob(job)}
-                >
-                  {acceptingId === job.order_id ? (
-                    <ActivityIndicator color="#fff" size="small" />
-                  ) : (
-                    <>
-                      <MaterialCommunityIcons name="check-circle" size={20} color="#fff" style={{ marginRight: 8 }} />
-                      <Text style={styles.acceptBtnText}>รับงานนี้ทันที</Text>
-                    </>
-                  )}
                 </TouchableOpacity>
+
+                {/* Action CTA Buttons */}
+                <View style={styles.cardActionsRow}>
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    style={styles.detailPreviewBtn}
+                    onPress={() => setSelectedPreviewJob(job)}
+                  >
+                    <Ionicons name="document-text-outline" size={18} color="#0284c7" />
+                    <Text style={styles.detailPreviewBtnText}>ดูรายละเอียด</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    disabled={acceptingId === job.order_id}
+                    style={[styles.acceptBtn, styles.acceptBtnFlex, acceptingId === job.order_id && styles.btnDisabled]}
+                    onPress={() => acceptJob(job)}
+                  >
+                    {acceptingId === job.order_id ? (
+                      <ActivityIndicator color="#fff" size="small" />
+                    ) : (
+                      <>
+                        <MaterialCommunityIcons name="check-circle" size={20} color="#fff" style={{ marginRight: 6 }} />
+                        <Text style={styles.acceptBtnText}>รับงานนี้ทันที</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
               </View>
-            ))}
+            );
+          })}
           </View>
         )}
       </ScrollView>
+
+      {/* Order Details Preview Modal */}
+      <Modal
+        visible={!!selectedPreviewJob}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSelectedPreviewJob(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.previewModalContainer}>
+            {/* Modal Header */}
+            <View style={styles.previewModalHeader}>
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={styles.previewModalTitle}>
+                    รายละเอียดออเดอร์ #{selectedPreviewJob?.order_id}
+                  </Text>
+                  {selectedPreviewJob?.is_multi_shop && (
+                    <View style={styles.multiShopBadgeSmall}>
+                      <Text style={styles.multiShopBadgeSmallText}>รวมหลายร้าน</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.previewModalSubtitle}>
+                  ตรวจสอบรายการสินค้าและจุดรับ-ส่งก่อนรับงาน
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.modalCloseBtn}
+                onPress={() => setSelectedPreviewJob(null)}
+              >
+                <Ionicons name="close" size={24} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Modal Scroll Content */}
+            <ScrollView showsVerticalScrollIndicator={false} style={styles.previewModalScroll}>
+              {/* Pickup Shops Section */}
+              <View style={styles.modalSectionCard}>
+                <View style={styles.modalSectionTitleRow}>
+                  <MaterialCommunityIcons name="storefront" size={18} color="#059669" />
+                  <Text style={styles.modalSectionHeading}>
+                    จุดรับสินค้า ({selectedPreviewJob?.shops?.length || 1} ร้านค้า)
+                  </Text>
+                </View>
+
+                {selectedPreviewJob?.shops?.map((shop, sIdx) => {
+                  const items = shop.items || [];
+                  const isMulti = (selectedPreviewJob?.shops?.length || 1) > 1;
+                  return (
+                    <View key={`modal_shop_${sIdx}`} style={[styles.modalShopBox, sIdx > 0 && styles.modalShopBoxBorder]}>
+                      <View style={styles.modalShopHeader}>
+                        <View style={[styles.stopNumberCircle, isMulti && { backgroundColor: '#0284c7' }]}>
+                          <Text style={styles.stopNumberCircleText}>{sIdx + 1}</Text>
+                        </View>
+                        <View style={{ flex: 1, marginLeft: 10 }}>
+                          <Text style={styles.modalShopNameText}>{shop.shop_name}</Text>
+                          <Text style={styles.modalShopAddressText}>{shop.shop_address}</Text>
+                          {!!shop.shop_phone && (
+                            <Text style={styles.modalShopPhoneText}>📞 {shop.shop_phone}</Text>
+                          )}
+                        </View>
+                      </View>
+
+                      {/* Items from this shop */}
+                      <View style={styles.modalItemsList}>
+                        <Text style={styles.itemsSubTitle}>รายการสินค้าที่ต้องรับ:</Text>
+                        {items.length > 0 ? (
+                          items.map((it, itIdx) => (
+                            <View key={`item_${itIdx}`} style={styles.modalItemRow}>
+                              <Text style={styles.modalItemNameText} numberOfLines={2}>
+                                • {it.name || (it as any).product_name}
+                              </Text>
+                              <View style={styles.itemQtyBadge}>
+                                <Text style={styles.itemQtyText}>x{it.quantity || 1}</Text>
+                              </View>
+                              {!!it.price && (
+                                <Text style={styles.modalItemPriceText}>฿{Number(it.price).toFixed(2)}</Text>
+                              )}
+                            </View>
+                          ))
+                        ) : (
+                          <Text style={styles.noItemsText}>มีรายการอาหารรอรับที่ร้านค้า</Text>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+
+              {/* Dropoff Customer Section */}
+              <View style={styles.modalSectionCard}>
+                <View style={styles.modalSectionTitleRow}>
+                  <Ionicons name="location" size={18} color="#ef4444" />
+                  <Text style={styles.modalSectionHeading}>จุดส่งมอบสินค้า (ลูกค้า)</Text>
+                </View>
+                <View style={{ marginLeft: 6 }}>
+                  <Text style={styles.customerNameText}>
+                    👤 {selectedPreviewJob?.customer_name || 'ลูกค้า'}
+                  </Text>
+                  {!!selectedPreviewJob?.customer_phone && (
+                    <Text style={styles.customerPhoneText}>
+                      📞 {selectedPreviewJob?.customer_phone}
+                    </Text>
+                  )}
+                  <Text style={styles.customerAddressText}>
+                    📍 {selectedPreviewJob?.customer_address}
+                  </Text>
+                  {!!selectedPreviewJob?.note_for_rider && (
+                    <View style={styles.noteBox}>
+                      <Text style={styles.noteTitle}>โน้ตจากลูกค้า:</Text>
+                      <Text style={styles.noteContent}>{selectedPreviewJob?.note_for_rider}</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              {/* Fare & Distance Summary */}
+              <View style={styles.modalFareCard}>
+                <View style={styles.fareRow}>
+                  <Text style={styles.fareLabel}>ระยะทางรวมโดยประมาณ:</Text>
+                  <Text style={styles.fareValue}>{selectedPreviewJob?.distance || '2.5 กม.'}</Text>
+                </View>
+                <View style={[styles.fareRow, { marginTop: 6 }]}>
+                  <Text style={styles.fareLabel}>ค่ารอบที่ไรเดอร์จะได้รับ:</Text>
+                  <Text style={styles.fareHighlight}>฿{Number(selectedPreviewJob?.delivery_fee || 0).toFixed(2)}</Text>
+                </View>
+              </View>
+            </ScrollView>
+
+            {/* Modal Actions */}
+            <View style={styles.modalActionRow}>
+              <TouchableOpacity
+                style={styles.modalCancelBtn}
+                onPress={() => setSelectedPreviewJob(null)}
+              >
+                <Text style={styles.modalCancelBtnText}>ปิด</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalAcceptBtn, acceptingId === selectedPreviewJob?.order_id && styles.btnDisabled]}
+                disabled={acceptingId === selectedPreviewJob?.order_id}
+                onPress={() => {
+                  if (selectedPreviewJob) {
+                    const jobToAccept = selectedPreviewJob;
+                    setSelectedPreviewJob(null);
+                    acceptJob(jobToAccept);
+                  }
+                }}
+              >
+                {acceptingId === selectedPreviewJob?.order_id ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <>
+                    <MaterialCommunityIcons name="check-circle" size={20} color="#fff" style={{ marginRight: 6 }} />
+                    <Text style={styles.modalAcceptBtnText}>รับงานนี้ทันที</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -889,6 +1213,27 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#f1f5f9',
   },
+  multiShopCard: {
+    borderColor: '#bae6fd',
+    backgroundColor: '#ffffff',
+  },
+  multiShopBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f9ff',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginBottom: 12,
+    gap: 6,
+  },
+  multiShopBannerText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0284c7',
+  },
   jobCardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -958,12 +1303,30 @@ const styles = StyleSheet.create({
     marginRight: 10,
   },
   pickupPin: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
     backgroundColor: '#10b981',
     borderWidth: 2,
     borderColor: '#a7f3d0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stopNumberText: {
+    fontSize: 8,
+    fontWeight: '900',
+    color: '#ffffff',
+  },
+  itemsCountBadge: {
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 6,
+  },
+  itemsCountText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#475569',
   },
   dropoffPinBox: {
     width: 20,
@@ -1027,6 +1390,318 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   acceptBtnText: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#ffffff',
+  },
+  cardTapHintBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 6,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  cardTapHintText: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '500',
+  },
+  cardActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 10,
+  },
+  detailPreviewBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f0f9ff',
+    borderWidth: 1.5,
+    borderColor: '#bae6fd',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    gap: 6,
+  },
+  detailPreviewBtnText: {
+    color: '#0284c7',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  acceptBtnFlex: {
+    flex: 1,
+    marginTop: 0,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    justifyContent: 'flex-end',
+  },
+  previewModalContainer: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '88%',
+    paddingBottom: Platform.OS === 'ios' ? 28 : 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  previewModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  previewModalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  previewModalSubtitle: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  multiShopBadgeSmall: {
+    backgroundColor: '#e0f2fe',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  multiShopBadgeSmallText: {
+    color: '#0284c7',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  modalCloseBtn: {
+    padding: 6,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 20,
+  },
+  previewModalScroll: {
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+  },
+  modalSectionCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  modalSectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  modalSectionHeading: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  modalShopBox: {
+    marginBottom: 4,
+  },
+  modalShopBoxBorder: {
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    paddingTop: 12,
+    marginTop: 10,
+  },
+  modalShopHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  stopNumberCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#059669',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  stopNumberCircleText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  modalShopNameText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  modalShopAddressText: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  modalShopPhoneText: {
+    fontSize: 12,
+    color: '#0284c7',
+    fontWeight: '600',
+    marginTop: 3,
+  },
+  modalItemsList: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 10,
+    marginTop: 8,
+    marginLeft: 34,
+    borderWidth: 1,
+    borderColor: '#edf2f7',
+  },
+  itemsSubTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#64748b',
+    marginBottom: 6,
+  },
+  modalItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 3,
+  },
+  modalItemNameText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#334155',
+    fontWeight: '500',
+  },
+  itemQtyBadge: {
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginHorizontal: 8,
+  },
+  itemQtyText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  modalItemPriceText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#059669',
+  },
+  noItemsText: {
+    fontSize: 12,
+    color: '#94a3b8',
+    fontStyle: 'italic',
+  },
+  customerNameText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginBottom: 4,
+  },
+  customerPhoneText: {
+    fontSize: 13,
+    color: '#0284c7',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  customerAddressText: {
+    fontSize: 13,
+    color: '#334155',
+    lineHeight: 18,
+  },
+  noteBox: {
+    backgroundColor: '#fffbeb',
+    padding: 10,
+    borderRadius: 10,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#fef3c7',
+  },
+  noteTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#d97706',
+    marginBottom: 2,
+  },
+  noteContent: {
+    fontSize: 12,
+    color: '#92400e',
+  },
+  modalFareCard: {
+    backgroundColor: '#f0fdf4',
+    borderWidth: 1.5,
+    borderColor: '#bbf7d0',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 16,
+  },
+  fareRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  fareLabel: {
+    fontSize: 13,
+    color: '#334155',
+    fontWeight: '600',
+  },
+  fareValue: {
+    fontSize: 13,
+    color: '#0f172a',
+    fontWeight: '700',
+  },
+  fareHighlight: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#059669',
+  },
+  modalActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+  },
+  modalCancelBtn: {
+    paddingVertical: 14,
+    paddingHorizontal: 22,
+    borderRadius: 16,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalCancelBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  modalAcceptBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 16,
+    backgroundColor: '#059669',
+    shadowColor: '#059669',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  modalAcceptBtnText: {
     fontSize: 16,
     fontWeight: '800',
     color: '#ffffff',

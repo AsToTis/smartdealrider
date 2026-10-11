@@ -4,6 +4,8 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useColorScheme, Alert } from 'react-native';
 import { useEffect } from 'react';
 import { AuthProvider, useAuth } from '../context/AuthContext';
+import GlobalNotificationManager from '../components/GlobalNotificationManager';
+import { ToastProvider } from '../context/ToastContext';
 SplashScreen.preventAutoHideAsync();
 
 let Notifications: any = null;
@@ -22,7 +24,7 @@ try {
 
 function RootLayoutNav() {
   const colorScheme = useColorScheme();
-  const { token } = useAuth();
+  const { token, isLoading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
 
@@ -55,6 +57,8 @@ function RootLayoutNav() {
   }, []);
 
   useEffect(() => {
+    if (isLoading) return;
+
     const inAuthGroup = segments[0] === '(tabs)' || segments[0] === 'delivery' || segments[0] === 'proof-of-delivery';
 
     if (!token && inAuthGroup) {
@@ -64,10 +68,11 @@ function RootLayoutNav() {
       // Redirect to home if authenticated but trying to access login/register
       router.replace('/(tabs)');
     }
-  }, [token, segments]);
+  }, [token, isLoading, segments]);
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+      <GlobalNotificationManager />
       <Stack>
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="login" options={{ headerShown: false }} />
@@ -82,8 +87,10 @@ function RootLayoutNav() {
 
 export default function RootLayout() {
   return (
-    <AuthProvider>
-      <RootLayoutNav />
-    </AuthProvider>
+    <ToastProvider>
+      <AuthProvider>
+        <RootLayoutNav />
+      </AuthProvider>
+    </ToastProvider>
   );
 }

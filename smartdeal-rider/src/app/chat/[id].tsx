@@ -49,7 +49,7 @@ const quickRepliesBuyer = [
 
 export default function OrderChatScreen() {
   const router = useRouter();
-  const { id, target } = useLocalSearchParams<{ id: string; target?: string }>();
+  const { id, target, shop_id } = useLocalSearchParams<{ id: string; target?: string; shop_id?: string }>();
   const { rider } = useAuth();
   const orderId = Number(id);
   const riderId = rider?.id || (rider as any)?.rider_id || 1;
@@ -69,7 +69,8 @@ export default function OrderChatScreen() {
     if (!orderId) return;
     try {
       if (showLoading) setLoading(true);
-      const res = await api.get(`/orders/${orderId}/messages?role=rider&target=${activeChannel}`);
+      const shopQuery = shop_id ? `&shop_id=${shop_id}` : '';
+      const res = await api.get(`/orders/${orderId}/messages?role=rider&target=${activeChannel}${shopQuery}`);
       if (res.data?.success && Array.isArray(res.data.messages)) {
         setMessages(res.data.messages);
       }
@@ -78,7 +79,7 @@ export default function OrderChatScreen() {
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, [orderId, activeChannel]);
+  }, [orderId, activeChannel, shop_id]);
 
   useEffect(() => {
     fetchMessages(true);
@@ -138,13 +139,16 @@ export default function OrderChatScreen() {
 
     try {
       setSending(true);
-      const payload = {
+      const payload: any = {
         sender_id: riderId,
         sender_type: 'rider',
         receiver_type: activeChannel, // Strictly 'seller' or 'buyer'
         message: textToSend,
         image_url: selectedImage || null,
       };
+      if (shop_id) {
+        payload.shop_id = Number(shop_id);
+      }
 
       const res = await api.post(`/orders/${orderId}/messages`, payload);
       if (res.data?.success) {

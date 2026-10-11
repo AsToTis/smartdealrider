@@ -55,6 +55,19 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="reviews"
+        options={{
+          title: 'รีวิว',
+          tabBarIcon: ({ color, focused }) => (
+            <Ionicons 
+              name={focused ? 'star' : 'star-outline'} 
+              size={23} 
+              color={color} 
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="wallet"
         options={{
           title: 'กระเป๋าเงิน',
