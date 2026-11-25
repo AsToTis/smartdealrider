@@ -1,7 +1,7 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_URL = 'https://smartdeal-backend-vhjo.onrender.com/api';
+const API_URL = 'http://192.168.0.68:5000/api';
 
 const api = axios.create({
   baseURL: API_URL,
