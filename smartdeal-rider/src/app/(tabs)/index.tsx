@@ -17,6 +17,7 @@ import {
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
 import { useRouter, useFocusEffect } from 'expo-router';
 import api from '../../utils/api';
+import * as Location from 'expo-location';
 import { useAuth } from '../../context/AuthContext';
 
 interface ShopItem {
@@ -71,6 +72,35 @@ export default function RiderHomeScreen() {
     const riderId = rider?.id || (rider as any)?.rider_id;
     if (!riderId) return;
     api.put(`/rider/${riderId}/online-status`, { is_online: isOnline }).catch(() => {});
+  }, [isOnline, rider]);
+
+  // ส่งพิกัด GPS ลงฐานข้อมูล (riders.current_lat/lng) เฉพาะตอนเปิดรับงาน และแอปอยู่หน้าจอ
+  useEffect(() => {
+    const riderId = rider?.id || (rider as any)?.rider_id;
+    if (!riderId || !isOnline) return;
+    let sub: Location.LocationSubscription | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted' || cancelled) return;
+        sub = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, timeInterval: 20000, distanceInterval: 25 },
+          (loc) => {
+            api.put(`/riders/${riderId}/location`, {
+              lat: loc.coords.latitude,
+              lng: loc.coords.longitude,
+              speed: loc.coords.speed,
+              accuracy: loc.coords.accuracy,
+            }).catch(() => {});
+          }
+        );
+        if (cancelled) sub.remove();
+      } catch (e) {
+        // ปิด GPS / ไม่อนุญาต: แอปทำงานต่อได้ตามปกติ
+      }
+    })();
+    return () => { cancelled = true; if (sub) sub.remove(); };
   }, [isOnline, rider]);
   const [selectedPreviewJob, setSelectedPreviewJob] = useState<Job | null>(null);
   const [adminFare, setAdminFare] = useState({ baseFare: 35, perKm: 8, riderPercent: 100 });

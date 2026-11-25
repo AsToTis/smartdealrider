@@ -1,6 +1,7 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import api from '../utils/api';
 
 type RiderData = {
   id: number;
@@ -69,6 +70,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   const logout = async () => {
+    // บันทึกการออกจากระบบลงฐานข้อมูล (login_logs) พร้อมระยะเวลาใช้งาน
+    if (rider?.user_id) {
+      api.post('/logout', { user_id: rider.user_id, app_name: 'แอป Smart Deal Rider (ไรเดอร์)' }).catch(() => {});
+    }
     try {
       await AsyncStorage.multiRemove(['rider_token', 'rider_data']);
     } catch (e) {
