@@ -65,6 +65,13 @@ export default function RiderHomeScreen() {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [acceptingId, setAcceptingId] = useState<number | null>(null);
+
+  // บันทึกสถานะเปิด/ปิดรับงานลงฐานข้อมูล (riders.rider_status)
+  useEffect(() => {
+    const riderId = rider?.id || (rider as any)?.rider_id;
+    if (!riderId) return;
+    api.put(`/rider/${riderId}/online-status`, { is_online: isOnline }).catch(() => {});
+  }, [isOnline, rider]);
   const [selectedPreviewJob, setSelectedPreviewJob] = useState<Job | null>(null);
   const [adminFare, setAdminFare] = useState({ baseFare: 35, perKm: 8, riderPercent: 100 });
 

@@ -1,55 +1,70 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Platform, Modal, ScrollView } from 'react-native';
+import React, { useState, useCallback } from 'react';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Platform, Modal, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { Stack, useRouter } from 'expo-router';
+import { Stack, useRouter, useFocusEffect } from 'expo-router';
+import api from '../utils/api';
+import { useAuth } from '../context/AuthContext';
+
+// แปลงประเภทแจ้งเตือนจากฐานข้อมูลให้ตรงกับไอคอนเดิมของหน้าจอ
+const mapType = (t: string) => {
+  if (!t) return 'system';
+  if (t === 'message' || t.includes('chat')) return 'customer';
+  if (t.includes('shop') || t === 'store') return 'store';
+  return 'system';
+};
 
 export default function NotificationsScreen() {
   const router = useRouter();
+  const { rider } = useAuth();
   const [selectedNotif, setSelectedNotif] = useState<any>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Mock data for notifications
-  const [notifications, setNotifications] = useState([
-    {
-      id: '1',
-      title: 'มีงานใหม่ใกล้คุณ!',
-      message: 'ร้านข้าวมันไก่เจ๊อ้วน (ระยะทาง 1.2 กม.) ต้องการไรเดอร์ไปส่งอาหารที่หอพัก A',
-      time: '2 นาทีที่แล้ว',
-      type: 'system',
-      read: false,
-    },
-    {
-      id: '2',
-      title: 'ข้อความจากลูกค้า: คุณสมชาย',
-      message: 'รบกวนฝากซื้อน้ำแข็งเปล่า 1 ถุงด้วยนะครับ เดี๋ยวผมจ่ายเงินสดเพิ่มให้ตอนมาถึงครับ ขอบคุณมากครับ',
-      time: '15 นาทีที่แล้ว',
-      type: 'customer',
-      read: true,
-    },
-    {
-      id: '3',
-      title: 'ออเดอร์พร้อมรับแล้ว',
-      message: 'ร้านก๋วยเตี๋ยวเรืออยุธยา เตรียมอาหารเสร็จแล้ว มารับได้เลย',
-      time: '1 ชั่วโมงที่แล้ว',
-      type: 'store',
-      read: true,
-    },
-    {
-      id: '4',
-      title: 'โอนเงินค่ารอบสำเร็จ',
-      message: 'ระบบได้โอนเงินค่ารอบจำนวน ฿45.00 เข้ากระเป๋าเงินของคุณแล้ว',
-      time: '2 ชั่วโมงที่แล้ว',
-      type: 'system',
-      read: true,
-    },
-  ]);
+  // การแจ้งเตือนจริงจากฐานข้อมูล (ตาราง notifications)
+  const [notifications, setNotifications] = useState<any[]>([]);
+
+  const fetchNotifications = useCallback(async () => {
+    const userId = (rider as any)?.user_id;
+    if (!userId) return;
+    try {
+      const res = await api.get(`/notifications/${userId}`);
+      if (res.data?.success && Array.isArray(res.data.notifications)) {
+        setNotifications(res.data.notifications.map((n: any) => ({
+          id: String(n.notification_id),
+          notification_id: n.notification_id,
+          title: n.title,
+          message: n.message,
+          time: n.time_ago,
+          type: mapType(n.type),
+          read: !!n.is_read,
+        })));
+      }
+    } catch (e) {
+      console.error('Fetch rider notifications error:', e);
+    }
+  }, [rider]);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchNotifications();
+    }, [fetchNotifications])
+  );
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchNotifications();
+    setRefreshing(false);
+  };
 
   const handlePressNotification = (item: any) => {
-    // Mark as read
-    setNotifications(prev => 
+    // Mark as read (บันทึกลงฐานข้อมูล)
+    setNotifications(prev =>
       prev.map(n => n.id === item.id ? { ...n, read: true } : n)
     );
-    
+    if (!item.read && item.notification_id) {
+      api.put(`/notifications/${item.notification_id}/read`).catch(() => {});
+    }
+
     // Open modal to view details
     setSelectedNotif(item);
   };
@@ -102,6 +117,10 @@ export default function NotificationsScreen() {
         renderItem={renderItem}
         contentContainerStyle={styles.listContainer}
         showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#059669']} />}
+        ListEmptyComponent={
+          <Text style={[styles.message, { textAlign: 'center', marginTop: 40 }]}>ยังไม่มีการแจ้งเตือน</Text>
+        }
       />
 
       {/* Detail Modal */}
